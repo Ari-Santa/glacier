@@ -192,20 +192,35 @@ class Library:
         return exe
 
     # ------------------------------------------------------------------ running state
-    def exe_map(self) -> dict[str, str]:
-        """lower-case exe basename -> game uid (plus Battle.net)."""
-        m = {"battle.net.exe": BNET_UID}
+    def owners(self, procs) -> dict[int, str]:
+        """pid -> uid of the game (or Battle.net) each process belongs to.
+
+        WoW flavours share one install and exe names (`_retail_/Wow.exe`, `_forever_/Wow.exe`),
+        so when several installed games claim an exe, the flavour folder in its path decides.
+        """
+        claims: dict[str, list[GameState]] = {}
         for st in self.states.values():
             if st.installed:
                 for n in st.exe_names():
-                    m.setdefault(n, st.uid)
-        return m
+                    claims.setdefault(n, []).append(st)
+        out = {}
+        for p in procs:
+            if p.exe == "battle.net.exe":
+                out[p.pid] = BNET_UID
+                continue
+            sts = claims.get(p.exe)
+            if not sts:
+                continue
+            if len(sts) > 1 and p.argv:
+                parts = {s.lower() for s in re.split(r"[\\/]", p.argv[0])}
+                sts = [st for st in sts if st.game.subdir and st.game.subdir.lower() in parts] or sts
+            out[p.pid] = sts[0].uid
+        return out
 
     def refresh_running(self, procs=None) -> set[str]:
         procs = self.engine.processes() if procs is None else procs
-        exes = {p.exe for p in procs if not p.is_subprocess}
-        emap = self.exe_map()
-        running = {emap[e] for e in exes if e in emap}
+        owners = self.owners(procs)
+        running = {owners[p.pid] for p in procs if not p.is_subprocess and p.pid in owners}
         for st in self.states.values():
             st.running = st.uid in running
         return running

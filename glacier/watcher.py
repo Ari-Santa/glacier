@@ -67,10 +67,10 @@ class WindowTagger:
         except Exception:
             self.available = False
 
-    def tick(self, procs, exe_map: dict[str, str]) -> list[tuple[int, str]]:
+    def tick(self, owners: dict[int, str]) -> list[tuple[int, str]]:
+        """Tag new windows of known processes; `owners` maps pid -> game uid."""
         if not self.x:
             return []
-        by_pid = {p.pid: p.exe for p in procs}
         done = []
         try:
             windows = self.x.client_windows()
@@ -84,10 +84,7 @@ class WindowTagger:
             if w in self.tagged:
                 continue
             pid = self.x.pid(w)
-            exe = by_pid.get(pid) if pid else None
-            if not exe:
-                continue
-            uid = exe_map.get(exe)
+            uid = owners.get(pid) if pid else None
             if not uid:
                 continue
             name = desktop.icon_name(uid)
@@ -152,7 +149,7 @@ def run_daemon(core, idle_exit: float = 30.0, interval: float = 1.0) -> int:
                 lib.scan()
                 last_scan = time.monotonic()
             running = lib.refresh_running(procs)
-            tagger.tick(procs, lib.exe_map())
+            tagger.tick(lib.owners(procs))
             tracker.tick(running)
             if lib.is_idle(procs):
                 idle_since = idle_since or time.monotonic()

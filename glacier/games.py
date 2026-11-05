@@ -41,6 +41,8 @@ _COD_NOTE = "Ricochet anti-cheat blocks Call of Duty multiplayer under Proton."
 GAMES: tuple[GameDef, ...] = (
     GameDef("wow", "World of Warcraft", "WoW", "World of Warcraft",
             ("_retail_/Wow.exe", "_retail_/WowT.exe"), "#2c5aa0", "WoW", subdir="_retail_"),
+    GameDef("wowf", "WoW Forever", "wowf", "World of Warcraft",
+            ("_forever_/Wow.exe",), "#2b7a8c", "WoWF", subdir="_forever_"),
     GameDef("wow_classic", "WoW Classic", "WoWC", "World of Warcraft",
             ("_classic_/WowClassic.exe",), "#8a6d2b", "WoWC", subdir="_classic_"),
     GameDef("wow_classic_era", "WoW Classic Era", "WoWC", "World of Warcraft",

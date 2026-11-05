@@ -34,6 +34,11 @@ SYSTEM_EXES = {"services.exe", "winedevice.exe", "plugplay.exe", "svchost.exe", 
 BNET_HELPERS = {"battle.net.exe", "agent.exe", "agenthelper.exe", "battle.net launcher.exe",
                 "blizzarderror.exe", "battle.net-setup.exe", "blizzard uninstaller.exe",
                 "battle.net helper.exe", "blizzardbrowser.exe"}
+# Never killed to make room for a fresh Battle.net start.
+INSTALLER_EXES = {"battle.net-setup.exe", "blizzard uninstaller.exe"}
+# Seconds after Glacier started Battle.net during which a missing Battle.net.exe still means
+# "starting up" rather than "crashed".
+STARTUP_GRACE = 45
 
 
 def detect_language() -> str:
@@ -224,6 +229,22 @@ class BattleNet:
         return [p for p in self.engine.processes()
                 if p.exe not in SYSTEM_EXES and p.exe not in BNET_HELPERS and not p.is_subprocess]
 
+    def stale_prefix(self) -> bool:
+        """The prefix is still up although Battle.net is gone and nothing else needs it.
+
+        That is what a Battle.net crash leaves behind (wineserver, explorer, Agent, Xalia
+        shutting down). A client started into it with `run` joins the dying wineserver and
+        dies within seconds, so it has to be cleared first.
+        """
+        if self.running() or not self.engine.wineserver_running():
+            return False
+        procs = self.engine.processes()
+        if any(p.exe in INSTALLER_EXES for p in procs) or self.busy_processes():
+            return False
+        # A client Glacier started moments ago may not have its main process up yet.
+        started = self._read_session().get("started")
+        return not (isinstance(started, (int, float)) and 0 <= time.time() - started < STARTUP_GRACE)
+
     def logged_in_hint(self) -> bool:
         """Best effort: the client remembers an account once someone has logged in."""
         try:
@@ -379,6 +400,8 @@ class BattleNet:
                 # Launch options changed: restart so the game inherits the new environment.
                 self.engine.kill_all()
                 running = False
+        elif not running and self.stale_prefix():
+            self.engine.kill_all()
         if running:
             # Hand the command to the running client. `runinprefix` skips Proton's steam.exe
             # shim, which would otherwise linger until Battle.net itself exits.

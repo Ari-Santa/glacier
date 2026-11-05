@@ -305,6 +305,31 @@ def test_catalog_unique():
     assert games.lookup("WTCG").uid == "hsb"
     assert games.lookup("hs_beta").uid == "hsb"
     assert games.lookup("world of warcraft").uid == "wow"
+    assert games.lookup("wowf").name == "WoW Forever"
+
+
+def test_wow_flavours_sharing_an_exe(engine: Engine, tmp_path: Path):
+    """Retail and Forever both run Wow.exe; the flavour folder says which one is up."""
+    from glacier.battlenet import BattleNet
+    from glacier.engine import WineProc
+    from glacier.library import BNET_UID, GameState, Library
+    root = tmp_path / "library" / "World of Warcraft"
+    lib = Library(engine, BattleNet(engine))
+    lib.states = {uid: GameState(games.lookup(uid), installed=True, install_dir=root)
+                  for uid in ("wow", "wowf", "wow_classic")}
+    procs = [WineProc(1, "wow.exe", ["\\\\?\\D:\\World of Warcraft\\_forever_\\Wow.exe"]),
+             WineProc(2, "wow.exe", ["D:/World of Warcraft/_forever_/Wow.exe", "--type=gpu-process"]),
+             WineProc(3, "battle.net.exe", ["C:\\Program Files (x86)\\Battle.net\\Battle.net.exe"]),
+             WineProc(4, "explorer.exe", ["C:\\windows\\system32\\explorer.exe"])]
+    assert lib.owners(procs) == {1: "wowf", 2: "wowf", 3: BNET_UID}
+    assert lib.refresh_running(procs) == {"wowf", BNET_UID}
+    assert lib.states["wowf"].running and not lib.states["wow"].running
+
+    procs[0] = WineProc(1, "wow.exe", ["D:\\World of Warcraft\\_retail_\\Wow.exe"])
+    assert lib.owners(procs)[1] == "wow"
+    # No folder in the path: first claimant, as before.
+    procs[0] = WineProc(1, "wow.exe", ["Wow.exe"])
+    assert lib.owners(procs)[1] == "wow"
 
 
 def test_config_roundtrip(tmp_path: Path):
@@ -390,3 +415,43 @@ def test_login_region_and_setregion(engine: Engine):
     assert bn.region() == "eu"
     engine.cfg["region"] = "us"
     assert bn.region() == "us"
+
+
+def test_stale_prefix_after_crash(engine: Engine, monkeypatch):
+    import time
+
+    from glacier.battlenet import BattleNet
+    from glacier.engine import WineProc
+    bn = BattleNet(engine)
+    # What a Battle.net crash leaves behind: Wine services, Agent and a CEF renderer.
+    procs = [WineProc(1, "explorer.exe", ["C:\\windows\\system32\\explorer.exe", "/desktop"]),
+             WineProc(2, "agent.exe", ["C:/ProgramData/Battle.net/Agent/Agent.9852/Agent.exe"]),
+             WineProc(3, "battle.net.exe", ["Battle.net.exe", "--type=renderer"])]
+    session = {"started": time.time() - 3 * 3600}
+    monkeypatch.setattr(engine, "processes", lambda: procs)
+    monkeypatch.setattr(engine, "wineserver_running", lambda: True)
+    monkeypatch.setattr(bn, "_read_session", lambda: session)
+    assert bn.stale_prefix()
+    # Not while Battle.net itself, a game or an installer is running.
+    for extra in ("battle.net.exe", "wow.exe", "battle.net-setup.exe"):
+        procs.append(WineProc(9, extra, [extra]))
+        assert not bn.stale_prefix(), extra
+        procs.pop()
+    # Not while a start Glacier just made is still coming up.
+    session["started"] = time.time() - 5
+    assert not bn.stale_prefix()
+    session["started"] = time.time() - 3 * 3600
+
+    # launch() clears the leftovers and starts fresh instead of joining them with `run`.
+    killed = []
+    monkeypatch.setattr(engine, "kill_all", lambda: killed.append(True))
+    monkeypatch.setattr(engine, "fingerprint", lambda uid: "fp")
+    monkeypatch.setattr(engine, "build", lambda exe, args, **kw: kw["verb"])
+    monkeypatch.setattr(engine, "spawn", lambda spec: spec)
+    monkeypatch.setattr(bn, "installed", lambda: True)
+    monkeypatch.setattr(bn, "apply_config", lambda: None)
+    monkeypatch.setattr(bn, "_write_session", lambda fp: None)
+    assert bn.launch() == "auto" and killed == [True]
+
+    monkeypatch.setattr(engine, "wineserver_running", lambda: False)
+    assert not bn.stale_prefix()

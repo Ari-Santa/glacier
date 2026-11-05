@@ -191,7 +191,7 @@ class MainWindow(QMainWindow):
         if self.tagger is None and not self.lock.held and self.lock.acquire():
             self.tagger = WindowTagger()
         if self.tagger:
-            self.tagger.tick(procs, lib.exe_map())
+            self.tagger.tick(lib.owners(procs))
             self.tracker.tick(running)
         bnet_running = BNET_UID in running
         if running != self._running:
@@ -410,9 +410,10 @@ class MainWindow(QMainWindow):
                              lambda _: self.set_status(f"Launching {name}…"), key=f"launch-{uid}", quiet=True)
             self._flash_launch(uid)
         elif action == "stop":
-            names = st.exe_names()
-            for p in self.core.engine.processes():
-                if p.exe in names:
+            procs = self.core.engine.processes()
+            owners = lib.owners(procs)
+            for p in procs:
+                if owners.get(p.pid) == uid:
                     try:
                         os.kill(p.pid, signal.SIGTERM)
                     except OSError:
