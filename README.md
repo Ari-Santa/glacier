@@ -29,9 +29,21 @@ Needs Python 3.11+, PyQt6, requests and Pillow (`sudo apt install python3-pyqt6 
 ./install.sh --uninstall [--purge]
 ```
 
+Or take a release: download `glacier-<version>.tar.gz` from
+[Releases](https://github.com/Ari-Santa/glacier/releases), unpack it and run its `./install.sh`.
+
 Then open **Glacier** from the app menu. On first start it sets up everything by itself;
 when the Battle.net login window appears, log in and install games as usual. They show up in
 Glacier and in your app menu automatically.
+
+### Updates
+
+Glacier checks its GitHub releases (at most every 6 hours; *Settings → Glacier updates*) and shows
+a banner when a newer version is out. **Update Glacier** (or `glacier self-update`) downloads the
+release tarball, checks it against the release's `SHA256SUMS`, runs its `install.sh` into the same
+place and offers to restart Glacier; Battle.net and running games are left alone. A copy installed
+with `--dev` runs from your checkout, so update that one with `git pull`. While the repository is
+private, the check goes through the GitHub CLI: `gh auth login` once on each machine.
 
 ## Command line
 
@@ -49,6 +61,7 @@ glacier menu [--remove]      sync app-menu entries;  glacier icons [--force]
 glacier run X.exe [args]     run any Windows program in the prefix; winecfg|regedit|taskmgr|explorer
 glacier curseforge [install|update|launch|sync|remove|status [-u]]   CurseForge addon manager (AppImage)
 glacier config [key [json]]  read/change settings;  glacier logs [-n 100]
+glacier self-update [--check]  update Glacier itself from its GitHub releases
 ```
 
 ## How the per-game icons work
@@ -99,10 +112,16 @@ makes it Battle.net's default install location, so big games can live on another
 podman build -t glacier-test -f tools/Containerfile.test tools
 podman run --rm -v "$PWD":/src:Z,ro glacier-test sh -c 'python -m pytest -q -p no:cacheprovider && ruff check --no-cache glacier tests tools'
 python3 tools/make_icon.py   # re-render the app icon
+tools/release.sh 0.3.0 [notes.md]   # tag, build glacier-0.3.0.tar.gz + SHA256SUMS, publish the GitHub release
 ```
+
+To release: bump `__version__` in `glacier/__init__.py` and `version` in `pyproject.toml`, commit and
+push `master`, then run `tools/release.sh`. It refuses to run on a dirty or unpushed tree or when
+the two version numbers disagree.
 
 Code map: `engine.py` (Proton commands, prefix, processes), `proton.py` (runner/runtime
 discovery and downloads), `battlenet.py` (client install/launch), `library.py` (games, icons,
 menus), `blizzard.py` (product.db, .build.info, version service), `pe.py` (icon extraction),
 `x11.py` + `watcher.py` (window tagging, playtime), `curseforge.py` (CurseForge AppImage),
+`selfupdate.py` (Glacier's own updates),
 `gui/` (PyQt6 interface), `cli.py`.

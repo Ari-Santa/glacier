@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QFrame, QHBoxLayout, QL
                              QMenu, QMessageBox, QProgressBar, QPushButton, QStackedWidget,
                              QSystemTrayIcon, QVBoxLayout, QWidget)
 
-from .. import APP_ID, APP_NAME, __version__, desktop, paths, proton
+from .. import APP_ID, APP_NAME, __version__, desktop, paths, proton, selfupdate
 from ..core import Core
 from ..curseforge import CurseForge, sync_games
 from ..engine import EngineError
@@ -33,6 +33,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.core = Core()
         self.curseforge = CurseForge()
+        self.glacier_update: selfupdate.Release | None = selfupdate.available()
+        self._announced_update = ""
         self.tasks = TaskManager()
         self.tasks.changed.connect(self._tasks_changed)
         self.tasks.error.connect(self._task_error)
@@ -75,7 +77,7 @@ class MainWindow(QMainWindow):
 
         self.poll_timer = QTimer(self, interval=1500, timeout=self.poll)
         self.poll_timer.start()
-        self.update_timer = QTimer(self, interval=30 * 60 * 1000, timeout=lambda: self.rescan(check_updates=True))
+        self.update_timer = QTimer(self, interval=30 * 60 * 1000, timeout=self._periodic_checks)
         self.update_timer.start()
         QTimer.singleShot(0, self.startup)
 
@@ -180,7 +182,71 @@ class MainWindow(QMainWindow):
         if self.core.cfg["auto_update_ge"]:
             self.tasks.start("Checking GE-Proton", lambda p, c: self.core.update_ge(p, c),
                              lambda r: r and self.notify(f"Installed {r.name}"), key="ge-update", quiet=True)
+        if self.core.cfg["check_glacier_updates"]:
+            self.check_glacier_update()
         self.update_banner()
+
+    def _periodic_checks(self):
+        self.rescan(check_updates=True)
+        if self.core.cfg["check_glacier_updates"]:
+            self.check_glacier_update()     # asks GitHub at most every 6 hours
+
+    # ------------------------------------------------------------------ Glacier's own updates
+    def check_glacier_update(self, force: bool = False):
+        """Look for a newer Glacier release; `force` = the user asked (say the result either way)."""
+        def done(rel):
+            self.glacier_update = rel
+            self.update_banner()
+            self.settings_page.refresh_updates()
+            if rel and rel.version != self._announced_update:
+                self._announced_update = rel.version
+                self.notify(f"Glacier {rel.version} is available.")
+            elif force and not rel:
+                self.set_status(f"Glacier {__version__} is up to date.")
+
+        def failed(msg):
+            self.settings_page.refresh_updates(error=msg)
+            if force:
+                QMessageBox.warning(self, "Glacier updates", msg)
+
+        self.tasks.start("Checking for Glacier updates", lambda p, c: selfupdate.check(force=force), done,
+                         on_error=failed, key="glacier-update-check", quiet=True)
+        self.settings_page.refresh_updates()
+
+    def update_glacier(self):
+        rel = self.glacier_update
+        if rel is None:
+            return
+        ok, why = selfupdate.can_self_update()
+        if not ok:
+            QMessageBox.information(self, "Update Glacier", f"Glacier {rel.version} is available.\n\n{why}")
+            return
+        if QMessageBox.question(self, "Update Glacier",
+                                f"Update Glacier {__version__} to {rel.version}?\n\n{rel.summary}\n\n"
+                                "Battle.net and running games are not affected. Glacier restarts afterwards."
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+
+        def done(version):
+            self.glacier_update = None
+            self.update_banner()
+            self.settings_page.refresh_updates()
+            if QMessageBox.question(self, "Glacier updated",
+                                    f"Glacier {version} is installed. Restart Glacier now?"
+                                    ) == QMessageBox.StandardButton.Yes:
+                self.restart()
+
+        self.tasks.start("Updating Glacier", lambda p, c: selfupdate.install(rel, p, c), done,
+                         on_error=lambda _m: self.settings_page.refresh_updates(), key="glacier-update")
+        self.settings_page.refresh_updates()
+
+    def restart(self):
+        """Start a fresh Glacier once this one has exited, then quit."""
+        import subprocess
+        cmd = desktop.glacier_command()
+        subprocess.Popen(["sh", "-c", 'sleep 2; exec "$@"', "sh", *cmd], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.quit()
 
     def poll(self):
         core = self.core
@@ -344,6 +410,16 @@ class MainWindow(QMainWindow):
             page.set_banner("Log in to Battle.net to get your games",
                             "Installed games appear here automatically, with their own icons and menu entries.",
                             "Open Battle.net", self.start_battlenet, None, bn_pm)
+        elif self.tasks.running("glacier-update"):
+            t = self.tasks.active["glacier-update"]
+            page.set_banner("Updating Glacier", t.message, "", None, t.fraction,
+                            pixmap_from_file(paths.ASSETS_DIR / "glacier-64.png", 40))
+        elif self.glacier_update:
+            rel = self.glacier_update
+            page.set_banner(f"Glacier {rel.version} is available",
+                            rel.summary or f"You have {__version__}. Released {rel.published}.",
+                            "Update Glacier", self.update_glacier, None,
+                            pixmap_from_file(paths.ASSETS_DIR / "glacier-64.png", 40))
         else:
             page.set_banner(None)
 

@@ -80,7 +80,10 @@ def cmd_status(core: Core, a) -> int:
         }
         print(json.dumps(out, indent=2))
         return 0
-    print(f"{APP_NAME} {__version__}")
+    from . import selfupdate
+    newer = selfupdate.available()
+    print(f"{APP_NAME} {__version__}" + (f"  (Glacier {newer.version} is available: glacier self-update)"
+                                         if newer else ""))
     print(f"  Proton   : {r.label if r else 'none found'}")
     print(f"  Runtime  : {rt.name if rt else ('disabled' if not core.cfg['use_runtime'] else 'n/a')}")
     print(f"  Prefix   : {core.engine.pfx} ({'ok' if core.engine.prefix_exists() else 'not created'})")
@@ -319,6 +322,28 @@ def cmd_curseforge(core: Core, a) -> int:
     return 0
 
 
+def cmd_self_update(core: Core, a) -> int:
+    from . import selfupdate
+    rel = selfupdate.check(force=True)
+    if rel is None:
+        latest = selfupdate.cached_latest()
+        print(f"{APP_NAME} {__version__} is up to date." + ("" if latest else " (No release published yet.)"))
+        return 0
+    print(f"{APP_NAME} {rel.version} is available (you have {__version__}), released {rel.published}: {rel.url}")
+    if rel.summary:
+        print(f"  {rel.summary}")
+    if a.check:
+        return 0
+    ok, why = selfupdate.can_self_update()
+    if not ok:
+        print(why, file=sys.stderr)
+        return 1
+    version = selfupdate.install(rel, _progress())
+    _done_line()
+    print(f"Installed {APP_NAME} {version}. Restart Glacier (the window and tray) to use it.")
+    return 0
+
+
 def cmd_config(core: Core, a) -> int:
     if a.key is None:
         print(json.dumps(core.cfg.data, indent=2, sort_keys=True))
@@ -454,6 +479,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="(install) download again even if up to date")
     s.add_argument("-u", "--check-updates", action="store_true", help="(status) check for a newer download")
     s.set_defaults(func=cmd_curseforge)
+
+    s = sub.add_parser("self-update", help="update Glacier itself from its GitHub releases")
+    s.add_argument("--check", action="store_true", help="only report whether an update is available")
+    s.set_defaults(func=cmd_self_update)
 
     s = sub.add_parser("config", help="show or change settings")
     s.add_argument("key", nargs="?")

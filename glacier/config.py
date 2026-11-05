@@ -47,6 +47,7 @@ DEFAULTS: dict[str, Any] = {
     "setup_done": False,
     "auto_update_ge": False,
     "check_updates": True,
+    "check_glacier_updates": True,  # look for new Glacier releases on GitHub (at most every 6 h)
 
     "games": {},
 }

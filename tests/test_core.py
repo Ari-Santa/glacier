@@ -734,3 +734,105 @@ def test_curseforge_sync_first_start(tmp_path: Path):
     res = sync_instances([Flavour("wow", tmp_path / "wow" / "_retail_", "12.1.5.1", True)], tmp_path / "cf")
     data = json.loads((tmp_path / "cf" / "agent" / "GameInstances" / "AddonGameInstance.json").read_text())
     assert res.added and [e["name"] for e in data] == ["Retail"] and data[0]["gameTypeID"] == 1
+
+
+# ----------------------------------------------------------------------------- Glacier self-update
+
+def test_selfupdate_versions():
+    from glacier.selfupdate import is_newer, parse_version
+    assert parse_version("v0.2.0") == (0, 2, 0) and parse_version("1.10") == (1, 10)
+    assert parse_version("v1.2-beta") is None and parse_version("") is None
+    assert is_newer("v0.10.0", "0.9.9") and is_newer("0.2.1", "0.2") and not is_newer("0.2.0", "0.2")
+    assert not is_newer("0.1.9", "0.2.0") and not is_newer("garbage", "0.1.0")
+
+
+def _gh_release(version: str, assets=("tar", "sums"), **extra) -> dict:
+    files = {"tar": f"glacier-{version}.tar.gz", "sums": "SHA256SUMS"}
+    return {"tag_name": f"v{version}", "html_url": f"https://github.com/x/glacier/releases/tag/v{version}",
+            "published_at": "2026-11-05T22:00:00Z", "body": "## Highlights\nCurseForge support\n",
+            "assets": [{"name": files[a], "browser_download_url": f"https://example.invalid/{files[a]}"}
+                       for a in assets], **extra}
+
+
+def test_selfupdate_release_json_and_check(tmp_path: Path, monkeypatch):
+    from glacier import selfupdate
+    rel = selfupdate.release_from_json(_gh_release("9.0.0"))
+    assert rel.version == "9.0.0" and rel.asset_name == "glacier-9.0.0.tar.gz" and rel.published == "2026-11-05"
+    assert rel.summary == "Highlights"
+    assert selfupdate.release_from_json(_gh_release("9.0.0", assets=("tar",))) is None      # no checksums
+    assert selfupdate.release_from_json(_gh_release("9.0.0", prerelease=True)) is None
+
+    monkeypatch.setattr(selfupdate, "STATE_FILE", tmp_path / "selfupdate.json")
+    calls = []
+    answer = {"rel": rel}
+    monkeypatch.setattr(selfupdate, "fetch_latest", lambda: calls.append(1) or answer["rel"])
+    assert selfupdate.check().version == "9.0.0" and len(calls) == 1
+    assert selfupdate.check().version == "9.0.0" and len(calls) == 1          # cached for 6 hours
+    assert selfupdate.available().version == "9.0.0"
+    answer["rel"] = selfupdate.release_from_json(_gh_release(selfupdate.__version__))
+    assert selfupdate.check(force=True) is None and len(calls) == 2           # same version: nothing to do
+    assert selfupdate.available() is None and selfupdate.cached_latest() is not None
+
+
+def _release_files(tmp_path: Path, version: str, top: str | None = None, init_version: str | None = None):
+    """A release tarball whose install.sh records where it was asked to install."""
+    import tarfile
+    src = tmp_path / "build" / (top or f"glacier-{version}")
+    (src / "glacier").mkdir(parents=True)
+    (src / "glacier" / "__init__.py").write_text(f'__version__ = "{init_version or version}"\n')
+    (src / "install.sh").write_text('#!/usr/bin/env bash\nset -e\nmkdir -p "$PREFIX"\n'
+                                    'echo installed > "$PREFIX/marker"\n')
+    out = tmp_path / "release"
+    out.mkdir(exist_ok=True)
+    tar = out / f"glacier-{version}.tar.gz"
+    with tarfile.open(tar, "w:gz") as tf:
+        tf.add(src, arcname=src.name)
+    (out / "SHA256SUMS").write_text(f"{hashlib.sha256(tar.read_bytes()).hexdigest()}  {tar.name}\n")
+    return out
+
+
+def test_selfupdate_install(tmp_path: Path, monkeypatch):
+    from glacier import download, paths, selfupdate
+    prefix = tmp_path / "prefix"
+    monkeypatch.setattr(paths, "PACKAGE_DIR", prefix / "lib" / "glacier" / "glacier")
+    monkeypatch.setattr(paths, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(selfupdate, "STATE_FILE", tmp_path / "selfupdate.json")
+    monkeypatch.setattr(selfupdate, "_gh", lambda: None)
+    files = {"dir": _release_files(tmp_path, "9.0.0")}
+
+    def fake_download(url, dest, progress=None, cancel=None):
+        shutil.copy(files["dir"] / url.rsplit("/", 1)[1], dest)
+        return Path(dest)
+
+    monkeypatch.setattr(download, "download", fake_download)
+    rel = selfupdate.release_from_json(_gh_release("9.0.0"))
+    assert selfupdate.can_self_update()[0]
+    assert selfupdate.install(rel) == "9.0.0"
+    assert (prefix / "marker").read_text() == "installed\n"          # install.sh ran with PREFIX=prefix
+
+    # A tarball that doesn't match SHA256SUMS is not installed.
+    (prefix / "marker").unlink()
+    sums = files["dir"] / "SHA256SUMS"
+    sums.write_text("0" * 64 + "  glacier-9.0.0.tar.gz\n")
+    with pytest.raises(selfupdate.UpdateError, match="Checksum"):
+        selfupdate.install(rel)
+    assert not (prefix / "marker").exists()
+
+    # Nor one with an unexpected layout or the wrong version inside.
+    for kw in ({"top": "evil"}, {"init_version": "6.6.6"}):
+        shutil.rmtree(tmp_path / "build")
+        files["dir"] = _release_files(tmp_path, "9.0.0", **kw)
+        with pytest.raises(selfupdate.UpdateError):
+            selfupdate.install(rel)
+        assert not (prefix / "marker").exists()
+
+
+def test_selfupdate_refuses_source_checkout(tmp_path: Path, monkeypatch):
+    from glacier import paths, selfupdate
+    checkout = tmp_path / "blizzard"
+    (checkout / ".git").mkdir(parents=True)
+    monkeypatch.setattr(paths, "PACKAGE_DIR", checkout / "glacier")
+    ok, why = selfupdate.can_self_update()
+    assert not ok and "git pull" in why
+    with pytest.raises(selfupdate.UpdateError):
+        selfupdate.install(selfupdate.release_from_json(_gh_release("9.0.0")))

@@ -823,7 +823,7 @@ class SettingsPage(QWidget):
         self._check(v, "Closing the window keeps Glacier in the tray", "close_to_tray")
         self._check(v, "Check Blizzard for game updates on start", "check_updates")
         row = QHBoxLayout()
-        b = button("Rebuild menu entries & icons", icon_name="view-refresh")
+        b = button("Rebuild menu entries && icons", icon_name="view-refresh")
         b.clicked.connect(lambda: self.win.sync_menus(force_icons=True))
         row.addWidget(b)
         b = button("Remove all menu entries", "danger", "edit-delete")
@@ -832,10 +832,50 @@ class SettingsPage(QWidget):
         row.addStretch(1)
         v.addLayout(row)
         lay.addWidget(box)
+
+        box = QGroupBox("Glacier updates")
+        v = QVBoxLayout(box)
+        self.upd_info = label("", muted=True, wrap=True)
+        self.upd_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.upd_info.setOpenExternalLinks(True)
+        v.addWidget(self.upd_info)
+        self._check(v, "Check GitHub for new Glacier releases (at most every 6 hours)", "check_glacier_updates")
+        row = QHBoxLayout()
+        self.b_upd_check = button("Check now", icon_name="view-refresh")
+        self.b_upd_check.clicked.connect(lambda: self.win.check_glacier_update(force=True))
+        self.b_upd_install = button("Update Glacier", "primary", "download")
+        self.b_upd_install.clicked.connect(self.win.update_glacier)
+        row.addWidget(self.b_upd_check)
+        row.addWidget(self.b_upd_install)
+        row.addStretch(1)
+        v.addLayout(row)
+        lay.addWidget(box)
         lay.addStretch(1)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll(body))
+        self.refresh_updates()
+
+    def refresh_updates(self, error: str = ""):
+        from .. import __version__, selfupdate
+        rel = self.win.glacier_update
+        busy = self.win.tasks.running("glacier-update") or self.win.tasks.running("glacier-update-check")
+        if self.win.tasks.running("glacier-update"):
+            text = "Updating…"
+        elif rel:
+            text = (f"Glacier {rel.version} is available (you have {__version__}, released {rel.published}). "
+                    f'<a href="{rel.url}">Release notes</a>')
+        else:
+            text = f"Glacier {__version__}."
+            latest = selfupdate.cached_latest()
+            if latest:
+                text += " This is the newest release."
+        if error:
+            text += f"<br>Last check failed: {error}"
+        self.upd_info.setText(text)
+        self.b_upd_install.setVisible(rel is not None)
+        self.b_upd_install.setEnabled(not busy)
+        self.b_upd_check.setEnabled(not busy)
 
     def _check(self, layout, text: str, key: str, after=None) -> QCheckBox:
         cb = QCheckBox(text)
