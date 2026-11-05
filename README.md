@@ -16,6 +16,7 @@ every game its own app-menu entry, icon and taskbar identity.
 | **Updates** | Compares installed versions with Blizzard's public version service (`us.version.battle.net`) and flags games with updates; Battle.net applies them when it runs. Optional autostart keeps Battle.net in the tray so games stay current. GE-Proton can auto-update too. |
 | **Launching** | `--exec="launch_uid <uid>"` through the running client (exact product, including WoW Classic flavours), or the game exe directly. Launches hand over to an already-running Battle.net in ~2 s. |
 | **Icons** | Extracts each game's icon from its `.exe` (pure-Python PE resource reader), installs it into the hicolor theme and writes `.desktop` entries. A small watcher **tags each game window** so KDE/GNOME show the right icon and group windows per game (see below). |
+| **Addons** | `glacier curseforge install` (or *Battle.net → Addons: CurseForge* in the GUI) downloads the official **CurseForge** AppImage from curseforge.com (host, size and MD5 checked), adds it to the app menu with its `cfauth://`/`curseforge://` link handlers. It runs natively, not in Proton, and updates itself; `glacier curseforge update` re-downloads when the published build changed. Glacier also tells CurseForge where WoW is: while CurseForge is closed it writes CurseForge's WoW list (`agent/GameInstances/AddonGameInstance.json`) from Battle.net's installed flavours, adding missing ones and dropping leftover `_ptr_`/`_beta_` folders that hold no addons (on install, before *Open CurseForge*, on library rescans, or `glacier curseforge sync`). |
 | **Extras** | MangoHud, GameMode, Gamescope, DXVK HUD, Wayland driver/HDR, custom env/wrappers (global or per game), playtime tracking, tray menu, logs viewer, winecfg/regedit/taskmgr. |
 
 ## Install
@@ -46,6 +47,7 @@ glacier kill                 stop Battle.net and every game in the prefix
 glacier proton list|available|install [TAG|latest]|update|use ID|remove ID
 glacier menu [--remove]      sync app-menu entries;  glacier icons [--force]
 glacier run X.exe [args]     run any Windows program in the prefix; winecfg|regedit|taskmgr|explorer
+glacier curseforge [install|update|launch|sync|remove|status [-u]]   CurseForge addon manager (AppImage)
 glacier config [key [json]]  read/change settings;  glacier logs [-n 100]
 ```
 
@@ -73,6 +75,7 @@ the prefix is idle. It needs X11/XWayland windows, so it doesn't apply with the 
 | `~/.local/share/glacier/prefix/` | `STEAM_COMPAT_DATA_PATH`; the Wine prefix is `pfx/` |
 | `~/.local/share/glacier/runners/` | GE-Proton builds downloaded by Glacier |
 | `~/.local/share/glacier/runtimes/` | Steam Linux Runtime (only when Steam's copy isn't found) |
+| `~/.local/share/glacier/apps/` | `CurseForge.AppImage` (menu entry: `~/.local/share/applications/CurseForge.desktop`; its own settings live in `~/.config/CurseForge`) |
 | `~/.local/state/glacier/logs/` | one log per launch; `stats.json` holds playtime |
 | `~/.local/share/applications/glacier-*.desktop` | menu entries (`X-Glacier-Managed=true`) |
 
@@ -83,6 +86,10 @@ makes it Battle.net's default install location, so big games can live on another
 
 * Logging in to Battle.net (and any 2FA) is up to you; Glacier never handles credentials.
 * Games with kernel anti-cheat that rejects Proton (Call of Duty's Ricochet) won't run online.
+* CurseForge's addon agent is a .NET program that only looks for OpenSSL 3/1.1. On systems
+  with only OpenSSL 4 (Ubuntu 26.10) it would crash on start, so Glacier starts CurseForge with
+  `DOTNET_OPENSSL_VERSION_OVERRIDE=4`. It runs with `--no-sandbox`, like its own menu entry,
+  because Ubuntu's AppArmor blocks Electron's sandbox for AppImages.
 * Settings such as MangoHud or env vars apply when Battle.net starts. Glacier restarts the
   client automatically when they change, but only if no game is running.
 
@@ -97,4 +104,5 @@ python3 tools/make_icon.py   # re-render the app icon
 Code map: `engine.py` (Proton commands, prefix, processes), `proton.py` (runner/runtime
 discovery and downloads), `battlenet.py` (client install/launch), `library.py` (games, icons,
 menus), `blizzard.py` (product.db, .build.info, version service), `pe.py` (icon extraction),
-`x11.py` + `watcher.py` (window tagging, playtime), `gui/` (PyQt6 interface), `cli.py`.
+`x11.py` + `watcher.py` (window tagging, playtime), `curseforge.py` (CurseForge AppImage),
+`gui/` (PyQt6 interface), `cli.py`.

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
+import shutil
 import struct
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -455,3 +458,279 @@ def test_stale_prefix_after_crash(engine: Engine, monkeypatch):
 
     monkeypatch.setattr(engine, "wineserver_running", lambda: False)
     assert not bn.stale_prefix()
+
+
+# ----------------------------------------------------------------------------- CurseForge
+
+def _fake_appimage(payload: bytes = b"hsqs" + bytes(60), interp: bool = True, magic: bytes = b"AI\x02") -> bytes:
+    """ELF64 header + one program header, then the payload where the section headers end."""
+    phoff, phentsize, shoff, shentsize, shnum = 64, 56, 120, 64, 2
+    ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + magic + bytes(8 - len(magic))
+    head = ident + struct.pack("<HHIQQQIHHHHHH", 2, 62, 1, 0, phoff, shoff, 0, 64,
+                               phentsize, 1, shentsize, shnum, 0)
+    ph = struct.pack("<I", 3 if interp else 1).ljust(phentsize, b"\0")
+    elf = (head + ph).ljust(shoff + shentsize * shnum, b"\0")
+    return elf + payload
+
+
+def test_inspect_appimage(tmp_path: Path):
+    from glacier.curseforge import inspect_appimage
+    f = tmp_path / "a.AppImage"
+    f.write_bytes(_fake_appimage())
+    info = inspect_appimage(f)
+    assert info.offset == 120 + 64 * 2 and not info.static_runtime
+    f.write_bytes(_fake_appimage(interp=False))
+    assert inspect_appimage(f).static_runtime
+    for bad in (b"MZ" + bytes(100), _fake_appimage(magic=b"AI\x01"), _fake_appimage(payload=b"nope" * 20)):
+        f.write_bytes(bad)
+        with pytest.raises(ValueError):
+            inspect_appimage(f)
+
+
+def test_curseforge_desktop_parsing_and_host_check():
+    from glacier import curseforge
+    from glacier.engine import EngineError
+    entry = curseforge.parse_desktop("[Desktop Entry]\nName=CurseForge\nExec=AppRun --no-sandbox %U\n"
+                                     "X-AppImage-Version=1.325.0-41594.41594\n\n[Desktop Action x]\nName=Other\n")
+    assert entry["Name"] == "CurseForge" and entry["Exec"] == "AppRun --no-sandbox %U"
+    assert curseforge.short_version(entry["X-AppImage-Version"]) == "1.325.0-41594"
+    curseforge.check_host("https://curseforge.overwolf.com/downloads/curseforge-latest-linux.AppImage")
+    for url in ("http://curseforge.overwolf.com/x.AppImage", "https://curseforge.overwolf.com.evil.net/x",
+                "https://example.com/curseforge.AppImage"):
+        with pytest.raises(EngineError):
+            curseforge.check_host(url)
+
+
+@pytest.fixture
+def cf_env(tmp_path: Path, monkeypatch):
+    """CurseForge with menu/icon dirs in tmp_path and the network and AppImage tools faked."""
+    from glacier import curseforge, download, paths
+    monkeypatch.setattr(paths, "APPLICATIONS_DIR", tmp_path / "applications")
+    monkeypatch.setattr(paths, "HICOLOR_DIR", tmp_path / "hicolor")
+    monkeypatch.setattr(paths, "ICONS_DIR", tmp_path / "icons")
+    monkeypatch.setattr(desktop, "refresh", lambda: None)
+    monkeypatch.setattr(curseforge, "can_mount", lambda info: True)
+    monkeypatch.setattr(curseforge, "openssl_override", lambda: "")
+    meta = curseforge.Metadata({"Name": "CurseForge", "StartupWMClass": "CurseForge",
+                                "MimeType": "x-scheme-handler/curseforge;x-scheme-handler/cfauth;",
+                                "X-AppImage-Version": "1.325.0-41594.41594"}, _png(64, (240, 100, 54, 255)))
+    monkeypatch.setattr(curseforge, "read_metadata", lambda path, info=None, timeout=120: meta)
+    state = {"body": _fake_appimage(b"hsqs" + b"build-1"), "corrupt": False, "downloads": 0}
+
+    def fake_remote(self):
+        body = state["body"]
+        return curseforge.Remote(curseforge.DOWNLOAD_URL, len(body), hashlib.md5(body).hexdigest(), "")
+
+    def fake_download(url, dest, progress=None, cancel=None):
+        state["downloads"] += 1
+        Path(dest).write_bytes(b"\0" * len(state["body"]) if state["corrupt"] else state["body"])
+        return dest
+
+    monkeypatch.setattr(curseforge.CurseForge, "remote", fake_remote)
+    monkeypatch.setattr(download, "download", fake_download)
+    return curseforge.CurseForge(tmp_path / "apps dir"), state
+
+
+def test_curseforge_install_update_remove(cf_env, tmp_path: Path, monkeypatch):
+    from glacier import curseforge, paths
+    from glacier.engine import EngineError
+    cf, state = cf_env
+    res = cf.install()
+    assert res.changed and res.version == "1.325.0-41594" and cf.version() == "1.325.0-41594"
+    assert cf.appimage.read_bytes() == state["body"] and os.access(cf.appimage, os.X_OK)
+    entry = (paths.APPLICATIONS_DIR / curseforge.DESKTOP_ID).read_text()
+    assert f'Exec="{cf.appimage}" --no-sandbox %U\n' in entry
+    assert "MimeType=x-scheme-handler/curseforge;x-scheme-handler/cfauth;\n" in entry
+    assert "StartupWMClass=CurseForge\n" in entry and "Icon=glacier-curseforge\n" in entry
+    assert desktop.entry_managed(curseforge.DESKTOP_ID)
+    assert (paths.HICOLOR_DIR / "256x256" / "apps" / "glacier-curseforge.png").is_file()
+
+    # Same build on the server: nothing downloaded.
+    assert not cf.install().changed and state["downloads"] == 1
+    assert not cf.update_available()
+
+    # A new build: update_available, then install replaces it.
+    state["body"] = _fake_appimage(b"hsqs" + b"build-2")
+    assert cf.update_available()
+    assert cf.install().changed and cf.appimage.read_bytes() == state["body"]
+
+    # A damaged download is retried once, then rejected; the installed build stays.
+    good = cf.appimage.read_bytes()
+    state["body"], state["corrupt"], state["downloads"] = _fake_appimage(b"hsqs" + b"build-3"), True, 0
+    with pytest.raises(EngineError):
+        cf.install()
+    assert state["downloads"] == 2 and cf.appimage.read_bytes() == good
+    state["corrupt"] = False
+
+    # Without FUSE the entry makes the AppImage extract itself instead of mounting, and with
+    # only OpenSSL 4 it points the addon agent at it.
+    monkeypatch.setattr(curseforge, "can_mount", lambda info: False)
+    monkeypatch.setattr(curseforge, "openssl_override", lambda: "4")
+    cf.integrate()
+    assert (f'Exec=env APPIMAGE_EXTRACT_AND_RUN=1 DOTNET_OPENSSL_VERSION_OVERRIDE=4 "{cf.appimage}" '
+            "--no-sandbox %U\n") in (paths.APPLICATIONS_DIR / curseforge.DESKTOP_ID).read_text()
+
+    cf.remove()
+    assert not cf.installed() and not cf.state_file.exists()
+    assert not desktop.entry_exists(curseforge.DESKTOP_ID)
+    assert not (paths.HICOLOR_DIR / "256x256" / "apps" / "glacier-curseforge.png").exists()
+
+
+def test_curseforge_openssl_override(tmp_path: Path, monkeypatch):
+    from glacier import curseforge
+    monkeypatch.delenv("DOTNET_OPENSSL_VERSION_OVERRIDE", raising=False)
+    monkeypatch.delenv("CLR_OPENSSL_VERSION_OVERRIDE", raising=False)
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    monkeypatch.setattr(curseforge, "LIB_DIRS", (str(lib),))
+    assert curseforge.openssl_override() == ""          # no OpenSSL at all: nothing to point at
+    (lib / "libssl.so.4").touch()
+    assert curseforge.openssl_override() == "4"         # Ubuntu 26.10: only OpenSSL 4
+    (lib / "libssl.so.3").touch()
+    assert curseforge.openssl_override() == ""          # .NET finds OpenSSL 3 by itself
+    (lib / "libssl.so.3").unlink()
+    monkeypatch.setenv("DOTNET_OPENSSL_VERSION_OVERRIDE", "4")
+    assert curseforge.openssl_override() == ""          # the user's own setting wins
+
+
+def test_curseforge_keeps_foreign_menu_entry(cf_env):
+    from glacier import curseforge, paths
+    from glacier.engine import EngineError
+    cf, state = cf_env
+    foreign = paths.APPLICATIONS_DIR / curseforge.DESKTOP_ID
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("[Desktop Entry]\nName=CurseForge\nExec=/opt/CurseForge/curseforge %U\n")
+    with pytest.raises(EngineError):
+        cf.install()
+    assert state["downloads"] == 0 and "/opt/CurseForge" in foreign.read_text()
+    cf.remove()
+    assert foreign.exists()
+
+
+@pytest.mark.skipif(not shutil.which("mksquashfs") or not shutil.which("unsquashfs"),
+                    reason="needs squashfs-tools")
+def test_curseforge_read_metadata_from_squashfs(tmp_path: Path):
+    from glacier import curseforge
+    root = tmp_path / "root"
+    for size, color in ((32, (0, 0, 255, 255)), (256, (255, 0, 0, 255))):
+        d = root / "usr" / "share" / "icons" / "hicolor" / f"{size}x{size}" / "apps"
+        d.mkdir(parents=True)
+        (d / "curseforge.png").write_bytes(_png(size, color))
+    (root / "curseforge.desktop").write_text("[Desktop Entry]\nName=CurseForge\nIcon=curseforge\n"
+                                             "X-AppImage-Version=1.325.0-41594.41594\n")
+    (root / "resources").mkdir()
+    (root / "resources" / "app.asar").write_bytes(b"x" * 4096)
+    sqfs = tmp_path / "img.sqfs"
+    subprocess.run(["mksquashfs", str(root), str(sqfs), "-quiet", "-noappend", "-all-root"], check=True,
+                   stdout=subprocess.DEVNULL)
+    app = tmp_path / "CurseForge.AppImage"
+    app.write_bytes(_fake_appimage(sqfs.read_bytes()))
+    meta = curseforge.read_metadata(app)
+    assert meta.entry["Name"] == "CurseForge" and meta.version == "1.325.0-41594"
+    from PIL import Image
+    assert Image.open(io.BytesIO(meta.icon)).size == (256, 256)       # the largest icon wins
+
+
+def test_curseforge_version_types():
+    from glacier.curseforge import version_type
+    assert version_type("wow", "12.1.5.70783") == 517
+    assert version_type("wowt", "") == 517 and version_type("wowxptr", "") == 517
+    assert version_type("wow_beta", "") == 517
+    assert version_type("wowf", "1.60.1.70790") == 88568
+    assert version_type("wow_classic_era", "1.15.9.1") == 67408
+    assert version_type("wow_classic_titan", "3.80.2.1") == 81212
+    assert version_type("wow_classic", "5.5.4.1") == 79434         # progression Classic: by expansion
+    assert version_type("wow_anniversary", "2.5.6.1") == 73246
+    assert version_type("wow_classic", "") is None                 # unknown version: don't guess
+    assert version_type("wow_classic", "9.0.1.1") is None
+    assert version_type("d4", "1.0") is None
+
+
+def test_scan_wow_flavours(tmp_path: Path):
+    from glacier.curseforge import scan_wow_flavours
+    root = tmp_path / "World of Warcraft"
+    for folder, code in (("_retail_", "wow"), ("_ptr_", "wowt"), ("_classic_", "wow_classic")):
+        (root / folder).mkdir(parents=True)
+        (root / folder / ".flavor.info").write_text(f"Product Flavor!STRING:0\n{code}\n")
+    (root / "_nothing_").mkdir()                                    # no .flavor.info: ignored
+    (root / "Data").mkdir()
+    (root / ".build.info").write_text("Branch!STRING:0|Version!STRING:0|Product!STRING:0\n"
+                                      "eu|12.1.5.70783|wow\neu|5.5.4.1|wow_classic\n")
+    found = {f.path.name: f for f in scan_wow_flavours({root: {"wow", "wow_classic"}})}
+    assert set(found) == {"_retail_", "_ptr_", "_classic_"}
+    assert found["_retail_"].installed and found["_retail_"].version == "12.1.5.70783"
+    assert found["_classic_"].code == "wow_classic" and found["_classic_"].version == "5.5.4.1"
+    assert not found["_ptr_"].installed and found["_ptr_"].code == "wowt"
+
+
+def _cf_instance(guid: str, path: str, name: str, vtype: int = 517, addons=(), game: int = 1) -> dict:
+    return {"guid": guid, "gameTypeID": game, "installPath": path, "name": name, "isValid": True,
+            "isEnabled": True, "gameVersionTypeId": vtype, "installedAddons": list(addons),
+            "preferenceAutoInstallUpdates": True, "syncProfile": {"GameInstanceGuid": guid}}
+
+
+def test_curseforge_sync_instances(tmp_path: Path):
+    import json
+
+    from glacier.curseforge import Flavour, sync_instances
+    root = tmp_path / "World of Warcraft"
+    for d in ("_retail_", "_forever_", "_ptr_", "_xptr_", "_classic_", "_anniversary_"):
+        (root / d).mkdir(parents=True)
+    cfg = tmp_path / "CurseForge"
+    inst = cfg / "agent" / "GameInstances" / "AddonGameInstance.json"
+    inst.parent.mkdir(parents=True)
+    original = [
+        _cf_instance("g-forever", f"{root}/_forever_/", "Forever", 88568),
+        _cf_instance("g-xptr", f"{root}/_xptr_/", "Retail PTR X"),                    # leftover
+        _cf_instance("g-ptr", f"{root}/_ptr_/", "Retail PTR", addons=[{"id": 1}]),     # leftover with addons
+        _cf_instance("g-gone", f"{root}/_beta_/", "Retail Beta"),                      # folder deleted
+        _cf_instance("g-own", "/home/u/Wow/_retail_/", "My copy"),                     # not Battle.net's
+        _cf_instance("g-eso", f"{root}/_xptr_/", "Other game", game=455),               # another game
+    ]
+    inst.write_text(json.dumps(original))
+    storage = cfg / "storage.json"
+    storage.write_text(json.dumps({"session-counter": "1", "internal-last-game-instances":
+                                   json.dumps({"lastGameInstances": {"1": "g-xptr"}, "startupGameId": 1})}))
+    flavours = [Flavour("wow", root / "_retail_", "12.1.5.70783", True),
+                Flavour("wowf", root / "_forever_", "1.60.1.70790", True),
+                Flavour("wowt", root / "_ptr_", "", False),
+                Flavour("wowxptr", root / "_xptr_", "", False),
+                Flavour("wow_classic", root / "_classic_", "5.5.4.1", True),
+                Flavour("wow_anniversary", root / "_anniversary_", "", True)]
+
+    res = sync_instances(flavours, cfg)
+    assert [a.split(" (")[0] for a in res.added] == ["Retail", "Classic"]
+    assert sorted(r.split(" (")[0] for r in res.removed) == ["Retail Beta", "Retail PTR X"]
+    assert res.unknown and "wow_anniversary" in res.unknown[0]
+    data = json.loads(inst.read_text())
+    by_name = {e["name"]: e for e in data}
+    assert set(by_name) == {"Forever", "Retail PTR", "My copy", "Other game", "Retail", "Classic"}
+    retail = by_name["Retail"]
+    assert retail["installPath"] == f"{root}/_retail_/" and retail["gameVersionTypeId"] == 517
+    assert retail["installedAddons"] == [] and retail["syncProfile"]["GameInstanceGuid"] == retail["guid"]
+    assert retail["guid"] not in {e["guid"] for e in original}
+    assert by_name["Classic"]["gameVersionTypeId"] == 79434
+    assert by_name["Forever"] == original[0]                       # existing entries untouched
+    # The last-used WoW instance pointed at a removed leftover: now Retail.
+    last = json.loads(json.loads(storage.read_text())["internal-last-game-instances"])
+    assert last["lastGameInstances"]["1"] == retail["guid"]
+    assert json.loads(inst.with_name(inst.name + ".glacier-backup").read_text()) == original
+
+    # Nothing left to do the second time.
+    again = sync_instances(flavours, cfg)
+    assert not again.changed and json.loads(inst.read_text()) == data
+
+    # A file Glacier doesn't understand is left alone.
+    inst.write_text('{"not": "a list"}')
+    assert sync_instances(flavours, cfg).skipped and inst.read_text() == '{"not": "a list"}'
+
+
+def test_curseforge_sync_first_start(tmp_path: Path):
+    import json
+
+    from glacier.curseforge import Flavour, sync_instances
+    # Before CurseForge ever ran, Glacier writes the list so it doesn't scan drives for leftovers.
+    (tmp_path / "wow" / "_retail_").mkdir(parents=True)
+    res = sync_instances([Flavour("wow", tmp_path / "wow" / "_retail_", "12.1.5.1", True)], tmp_path / "cf")
+    data = json.loads((tmp_path / "cf" / "agent" / "GameInstances" / "AddonGameInstance.json").read_text())
+    assert res.added and [e["name"] for e in data] == ["Retail"] and data[0]["gameTypeID"] == 1

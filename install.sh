@@ -24,10 +24,17 @@ for arg in "$@"; do
 done
 
 if [[ "$MODE" == "uninstall" ]]; then
-  if [[ -x "$BIN/glacier" ]]; then "$BIN/glacier" integrate --remove || true; fi
+  if [[ -x "$BIN/glacier" ]]; then
+    "$BIN/glacier" integrate --remove || true
+    if [[ "$PURGE" == 1 ]]; then
+      # Before the files go: stop the prefix, and drop CurseForge's menu entry (its AppImage
+      # lives in Glacier's data folder).
+      "$BIN/glacier" kill 2>/dev/null || true
+      "$BIN/glacier" curseforge remove >/dev/null 2>&1 || true
+    fi
+  fi
   rm -rf "$LIB" "$BIN/glacier"
   if [[ "$PURGE" == 1 ]]; then
-    "${BIN}/glacier" kill 2>/dev/null || true
     rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/glacier" "${XDG_CONFIG_HOME:-$HOME/.config}/glacier" \
            "${XDG_CACHE_HOME:-$HOME/.cache}/glacier" "${XDG_STATE_HOME:-$HOME/.local/state}/glacier"
     echo "Removed Glacier, its Wine prefix and all data."

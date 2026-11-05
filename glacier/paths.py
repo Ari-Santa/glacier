@@ -27,6 +27,7 @@ DATA_DIR = XDG_DATA / APP_ID
 RUNNERS_DIR = DATA_DIR / "runners"          # GE-Proton and other downloaded Proton builds
 RUNTIMES_DIR = DATA_DIR / "runtimes"        # Steam Linux Runtime containers (fallback when Steam is absent)
 ICONS_DIR = DATA_DIR / "icons"              # 256px PNGs extracted from game executables
+APPS_DIR = DATA_DIR / "apps"                # native Linux helpers Glacier installs (CurseForge AppImage)
 STEAM_STUB_DIR = DATA_DIR / "steam-stub"    # empty STEAM_COMPAT_CLIENT_INSTALL_PATH
 DEFAULT_PREFIX = DATA_DIR / "prefix"        # STEAM_COMPAT_DATA_PATH (wine prefix lives in ./pfx)
 

@@ -270,6 +270,55 @@ def cmd_proton(core: Core, a) -> int:
     return 1
 
 
+def _print_sync(res) -> None:
+    for line in res.lines():
+        print(line)
+
+
+def cmd_curseforge(core: Core, a) -> int:
+    from . import curseforge
+    cf = curseforge.CurseForge()
+    if a.action in ("install", "update"):
+        if a.action == "update" and not cf.installed():
+            print("CurseForge is not installed; use `glacier curseforge install`.", file=sys.stderr)
+            return 1
+        result = cf.install(_progress(), force=a.force)
+        _done_line()
+        print(result.message)
+        if result.changed:
+            print(f"  AppImage : {cf.appimage}")
+            print(f"  Menu     : {paths.APPLICATIONS_DIR / curseforge.DESKTOP_ID}")
+        _print_sync(curseforge.sync_games(core.bnet, core.engine))
+        return 0
+    if a.action == "sync":
+        res = curseforge.sync_games(core.bnet, core.engine)
+        _print_sync(res)
+        if not res.lines():
+            print("CurseForge's WoW list already matches Battle.net.")
+        return 0
+    if a.action == "launch":
+        _print_sync(curseforge.sync_games(core.bnet, core.engine))
+        log = cf.launch()
+        print(f"Starting CurseForge (log: {log})")
+        return 0
+    if a.action == "remove":
+        if not cf.installed():
+            print("CurseForge is not installed.")
+            return 0
+        cf.remove()
+        print("Removed CurseForge. Your addons and CurseForge's own settings are kept.")
+        return 0
+    # status
+    if not cf.installed():
+        print(f"CurseForge is not installed (`glacier curseforge install` gets it from {curseforge.PAGE_URL}).")
+        return 0
+    print(f"CurseForge {cf.version() or '?'}: {cf.appimage}")
+    if a.check_updates:
+        print("  An update is available (`glacier curseforge update`)." if cf.update_available()
+              else "  Up to date.")
+    return 0
+
+
 def cmd_config(core: Core, a) -> int:
     if a.key is None:
         print(json.dumps(core.cfg.data, indent=2, sort_keys=True))
@@ -397,6 +446,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("target", nargs="?", help="GE-Proton tag (install), runner id/name (use/remove)")
     s.add_argument("--no-select", action="store_true", help="install without switching to it")
     s.set_defaults(func=cmd_proton)
+
+    s = sub.add_parser("curseforge", help="install, update or open CurseForge (WoW addon manager)")
+    s.add_argument("action", nargs="?", default="status",
+                   choices=["status", "install", "update", "launch", "sync", "remove"],
+                   help="sync: make CurseForge's WoW folders match what Battle.net has installed")
+    s.add_argument("--force", action="store_true", help="(install) download again even if up to date")
+    s.add_argument("-u", "--check-updates", action="store_true", help="(status) check for a newer download")
+    s.set_defaults(func=cmd_curseforge)
 
     s = sub.add_parser("config", help="show or change settings")
     s.add_argument("key", nargs="?")

@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QFrame, QHBoxLayout, QL
 
 from .. import APP_ID, APP_NAME, __version__, desktop, paths, proton
 from ..core import Core
+from ..curseforge import CurseForge, sync_games
 from ..engine import EngineError
 from ..library import BNET_UID
 from ..watcher import PlaytimeTracker, WatcherLock, WindowTagger, spawn_detached
@@ -31,6 +32,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.core = Core()
+        self.curseforge = CurseForge()
         self.tasks = TaskManager()
         self.tasks.changed.connect(self._tasks_changed)
         self.tasks.error.connect(self._task_error)
@@ -228,6 +230,11 @@ class MainWindow(QMainWindow):
                         pass
             if core.bnet.installed():
                 core.library.ensure_bnet_icon()
+            if self.curseforge.installed():
+                try:    # keep CurseForge's WoW folders in step with Battle.net (only while it is closed)
+                    sync_games(core.bnet, core.engine)
+                except Exception:
+                    pass
             return status
 
         def done(status):
@@ -461,6 +468,44 @@ class MainWindow(QMainWindow):
             spec = self.core.engine.build(path, [], log_name="run")
             return self.core.engine.spawn(spec)
         self.tasks.start("Running program", work, key="run-exe", quiet=True)
+
+    def curseforge_action(self, action: str):
+        """install / update / open / remove the CurseForge AppImage."""
+        cf = self.curseforge
+        page = self.bnet_page
+        if action == "open":
+            try:
+                synced = sync_games(self.core.bnet, self.core.engine)
+                cf.launch()
+            except (EngineError, OSError) as e:
+                QMessageBox.warning(self, "CurseForge", str(e))
+            else:
+                extra = f" ({len(synced.added)} WoW folder(s) added, {len(synced.removed)} leftover(s) removed)" \
+                    if synced.changed else ""
+                self.set_status("Starting CurseForge…" + extra)
+            return
+        if action == "remove":
+            if QMessageBox.question(self, "Remove CurseForge",
+                                    "Remove the CurseForge app? Your addons and CurseForge's own "
+                                    "settings are kept.") != QMessageBox.StandardButton.Yes:
+                return
+            cf.remove()
+            self.notify("Removed CurseForge.")
+            page.refresh_curseforge()
+            return
+
+        def work(progress, cancel):
+            result = cf.install(progress, cancel)
+            return result, sync_games(self.core.bnet, self.core.engine)
+
+        def done(out):
+            result, synced = out
+            self.notify(" ".join([result.message] + synced.lines()[:3]))
+            page.refresh_curseforge()
+
+        self.tasks.start("CurseForge", work, done, key="curseforge",
+                         on_error=lambda _msg: page.refresh_curseforge())
+        page.refresh_curseforge()
 
     def install_ge(self, release: proton.Release):
         def done(r):

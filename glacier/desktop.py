@@ -154,11 +154,17 @@ def _escape_value(v: str) -> str:
 def write_entry(file_id: str, name: str, args: list[str], icon: str, *, comment: str = "",
                 wm_class: str = "", categories: str = "Game;", keywords: str = "",
                 actions: dict[str, tuple[str, list[str]]] | None = None,
-                extra_env: dict[str, str] | None = None) -> Path:
-    cmd = glacier_command() + args
+                extra_env: dict[str, str] | None = None, command: list[str] | None = None,
+                field_code: str = "", mime_types: str = "",
+                extra: dict[str, str] | None = None) -> Path:
+    """Write a menu entry. `command` runs a program directly instead of Glacier, `field_code`
+    (e.g. %U) is appended unescaped and `extra` adds more keys to [Desktop Entry]."""
+    cmd = (glacier_command() if command is None else list(command)) + args
     exec_line = " ".join(_quote_exec(a).replace("%", "%%") for a in cmd)
     if extra_env:
         exec_line = "env " + " ".join(_quote_exec(f"{k}={v}") for k, v in extra_env.items()) + " " + exec_line
+    if field_code:
+        exec_line += " " + field_code
     lines = [
         "[Desktop Entry]",
         "Type=Application",
@@ -179,6 +185,10 @@ def write_entry(file_id: str, name: str, args: list[str], icon: str, *, comment:
         lines.append(f"StartupWMClass={wm_class}")
     if keywords:
         lines.append(f"Keywords={keywords}")
+    if mime_types:
+        lines.append(f"MimeType={mime_types}")
+    for key, value in (extra or {}).items():
+        lines.append(f"{key}={_escape_value(value)}")
     if actions:
         lines.append("Actions=" + ";".join(actions) + ";")
     for key, (label, a_args) in (actions or {}).items():
@@ -199,6 +209,15 @@ def remove_entry(file_id: str) -> None:
 
 def entry_exists(file_id: str) -> bool:
     return (paths.APPLICATIONS_DIR / file_id).exists()
+
+
+def entry_managed(file_id: str) -> bool:
+    """The entry exists and Glacier wrote it (so Glacier may replace or remove it)."""
+    try:
+        text = (paths.APPLICATIONS_DIR / file_id).read_text(errors="replace")
+    except OSError:
+        return False
+    return "\nX-Glacier-Managed=true" in text
 
 
 def refresh() -> None:
