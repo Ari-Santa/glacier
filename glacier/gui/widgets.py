@@ -271,6 +271,8 @@ class GameCard(QFrame):
             kind, txt = "running", "Running"
         elif st.progress is not None:
             kind, txt = "", "In Battle.net"
+        elif st.needs_locate:
+            kind, txt = "", "Add to Battle.net"
         elif st.installed:
             kind, txt = "primary", "Play"
         else:

@@ -397,6 +397,11 @@ class MainWindow(QMainWindow):
             else:
                 self.run_setup()
                 return
+        if action == "play" and st.needs_locate and self.core.cfg.game(uid)["launch_mode"] != "direct":
+            # Copied-in game Battle.net hasn't adopted: show its page and say how to add it.
+            self.tasks.start("Battle.net", lambda p, c: lib.open_in_bnet(uid), key=f"open-{uid}", quiet=True)
+            QMessageBox.information(self, f"Add {name} to Battle.net", lib.locate_hint(st))
+            return
         if action == "play":
             def work(p, c):
                 p(f"Launching {name}…", -1)

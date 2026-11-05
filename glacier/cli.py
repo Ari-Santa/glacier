@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
 
-from . import APP_NAME, __version__, paths, proton, stats
+from . import APP_NAME, __version__, desktop, paths, proton, stats
 from .core import Core
 from .download import Cancelled
 from .engine import EngineError
+from .library import NotRegisteredError
 
 
 def _progress():
@@ -93,7 +96,7 @@ def cmd_status(core: Core, a) -> int:
         pt = play.get(s.uid, {}).get("playtime", 0)
         extra = f"  [{stats.fmt_playtime(pt)}]" if pt else ""
         ver = s.version + (f" → {s.latest}" if s.update_available else "")
-        print(f"  {s.uid:<16} {s.game.name:<34} {s.status_text:<16} {ver}{extra}")
+        print(f"  {s.uid:<16} {s.game.name:<34} {s.status_text:<18} {ver}{extra}")
     return 0
 
 
@@ -115,7 +118,16 @@ def cmd_launch(core: Core, a) -> int:
     if not core.bnet.installed():
         print("Battle.net is not installed; running setup first…", file=sys.stderr)
         core.setup(_progress())
-    proc, log = core.library.launch(a.game)
+    try:
+        proc, log = core.library.launch(a.game)
+    except NotRegisteredError as e:
+        # Usually started from the app menu with no terminal: show the game page and say why.
+        print(e, file=sys.stderr)
+        core.library.open_in_bnet(a.game)
+        if shutil.which("notify-send"):
+            subprocess.run(["notify-send", "-a", "Glacier", "-i", desktop.icon_name(core.library.get(a.game).uid),
+                            "Add the game to Battle.net first", str(e)], check=False)
+        return 1
     print(f"Launching {core.library.get(a.game).game.name} (log: {log})")
     _after_launch(a)
     return 0
@@ -185,7 +197,6 @@ def cmd_icons(core: Core, a) -> int:
         if s.installed:
             p = core.library.ensure_icon(s, force=a.force)
             print(f"{s.uid:<16} {p}")
-    from . import desktop
     desktop.refresh()
     return 0
 
@@ -296,7 +307,6 @@ def cmd_gui(core: Core | None, a) -> int:
 
 def cmd_integrate(core: Core, a) -> int:
     """Install Glacier's own menu entry/icon and refresh game entries."""
-    from . import desktop
     if a.remove:
         core.library.scan()
         core.library.remove_menu_entries()
