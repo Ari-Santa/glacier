@@ -42,8 +42,8 @@ Glacier checks its GitHub releases (at most every 6 hours; *Settings → Glacier
 a banner when a newer version is out. **Update Glacier** (or `glacier self-update`) downloads the
 release tarball, checks it against the release's `SHA256SUMS`, runs its `install.sh` into the same
 place and offers to restart Glacier; Battle.net and running games are left alone. A copy installed
-with `--dev` runs from your checkout, so update that one with `git pull`. While the repository is
-private, the check goes through the GitHub CLI: `gh auth login` once on each machine.
+with `--dev` runs from your checkout, so update that one with `git pull`. No GitHub account is
+needed; when the GitHub CLI (`gh`) is installed and signed in, Glacier asks through it instead.
 
 ## Command line
 

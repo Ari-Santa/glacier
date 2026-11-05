@@ -113,8 +113,8 @@ def fetch_latest() -> Release | None:
         return release_from_json(download.get_json(API_LATEST))
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
-            raise UpdateError(f"Glacier's releases aren't visible from here ({RELEASES_URL}). The repository "
-                              "is private: sign in with `gh auth login` to check for updates.") from None
+            raise UpdateError(f"Glacier's releases aren't visible from here ({RELEASES_URL}). If the "
+                              "repository is private, sign in with `gh auth login` to check for updates.") from None
         raise
 
 
