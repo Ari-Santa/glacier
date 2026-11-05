@@ -1,0 +1,21 @@
+[project]
+name = "glacier"
+version = "0.1.0"
+description = "Battle.net launcher for Linux built on Proton"
+requires-python = ">=3.11"
+dependencies = ["PyQt6", "requests", "Pillow"]
+
+[project.scripts]
+glacier = "glacier.cli:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP"]
+ignore = ["E731", "B008"]
+per-file-ignores = { "glacier/gui/theme.py" = ["E501"] }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

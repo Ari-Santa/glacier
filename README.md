@@ -1,0 +1,100 @@
+# Glacier
+
+A Battle.net launcher for Linux. Glacier sets up Proton, installs the official Battle.net
+client unattended, finds your Blizzard games, launches them, keeps them updated, and gives
+every game its own app-menu entry, icon and taskbar identity.
+
+![Glacier icon](glacier/assets/glacier-128.png)
+
+## What it does
+
+| | |
+|---|---|
+| **Proton** | Uses Steam's Proton builds (auto-detected in every Steam library) or downloads **GE-Proton** from GitHub (sha512-verified). Runs Proton inside the **Steam Linux Runtime** container the build asks for (`toolmanifest.vdf` → Runtime 3.0 *sniper* or 4.0), downloading the runtime itself when Steam isn't installed. |
+| **Install** | `glacier setup` (or the first GUI start) creates a dedicated prefix, downloads `Battle.net-Setup.exe` from battle.net (redirect host and signer checked), and installs it with `--lang`/`--installpath` so **no clicks are needed**. The only manual step is logging in to your Blizzard account. |
+| **Games** | Reads the Battle.net Agent's `product.db` (protobuf, decoded without dependencies) for installed games, paths, versions and live download/update progress. Falls back to scanning the usual folders. |
+| **Updates** | Compares installed versions with Blizzard's public version service (`us.version.battle.net`) and flags games with updates; Battle.net applies them when it runs. Optional autostart keeps Battle.net in the tray so games stay current. GE-Proton can auto-update too. |
+| **Launching** | `--exec="launch_uid <uid>"` through the running client (exact product, including WoW Classic flavours), or the game exe directly. Launches hand over to an already-running Battle.net in ~2 s. |
+| **Icons** | Extracts each game's icon from its `.exe` (pure-Python PE resource reader), installs it into the hicolor theme and writes `.desktop` entries. A small watcher **tags each game window** so KDE/GNOME show the right icon and group windows per game (see below). |
+| **Extras** | MangoHud, GameMode, Gamescope, DXVK HUD, Wayland driver/HDR, custom env/wrappers (global or per game), playtime tracking, tray menu, logs viewer, winecfg/regedit/taskmgr. |
+
+## Install
+
+Needs Python 3.11+, PyQt6, requests and Pillow (`sudo apt install python3-pyqt6 python3-requests python3-pil`).
+
+```bash
+./install.sh           # copies Glacier to ~/.local/lib/glacier, adds ~/.local/bin/glacier + menu entry
+./install.sh --dev     # same, but links to this checkout
+./install.sh --uninstall [--purge]
+```
+
+Then open **Glacier** from the app menu. On first start it sets up everything by itself;
+when the Battle.net login window appears, log in and install games as usual. They show up in
+Glacier and in your app menu automatically.
+
+## Command line
+
+```text
+glacier                      open the launcher (same as `glacier gui`, `--hidden` = tray only)
+glacier setup [--library D]  unattended setup: Proton runtime, prefix, Battle.net, menu entries
+glacier status [-u] [--json] Proton/Battle.net/game status (-u checks Blizzard for updates)
+glacier launch wow           play (ids: `glacier list`; launch codes and names work too)
+glacier install pro          ask Battle.net to install a game
+glacier open | repair | uninstall <game>
+glacier bnet [--background]  start Battle.net (tray only with --background)
+glacier kill                 stop Battle.net and every game in the prefix
+glacier proton list|available|install [TAG|latest]|update|use ID|remove ID
+glacier menu [--remove]      sync app-menu entries;  glacier icons [--force]
+glacier run X.exe [args]     run any Windows program in the prefix; winecfg|regedit|taskmgr|explorer
+glacier config [key [json]]  read/change settings;  glacier logs [-n 100]
+```
+
+## How the per-game icons work
+
+Proton names every X11 window `steam_app_<SteamGameId>` (or `steam_proton`), and a game started
+by Battle.net inherits Battle.net's environment. As a result every game looks like the same app
+to the desktop: wrong icon, all windows grouped together, pinned launchers never light up.
+
+Glacier's watcher matches each window's `_NET_WM_PID` to the Wine process in Glacier's prefix,
+maps the exe to a game, and tags the window with:
+
+* `_KDE_NET_WM_DESKTOP_FILE` / `_GTK_APPLICATION_ID` = `glacier-<game>`
+* `WM_CLASS` = `glacier-<game>` (matches `StartupWMClass` in the generated `.desktop` file)
+
+KWin picks this up live, so each game gets its own taskbar entry and icon. The watcher runs
+inside the GUI, or as a short-lived `glacier watch` process after menu launches; it exits once
+the prefix is idle. It needs X11/XWayland windows, so it doesn't apply with the Wine Wayland driver.
+
+## Files
+
+| Path | Contents |
+|---|---|
+| `~/.config/glacier/config.json` | settings |
+| `~/.local/share/glacier/prefix/` | `STEAM_COMPAT_DATA_PATH`; the Wine prefix is `pfx/` |
+| `~/.local/share/glacier/runners/` | GE-Proton builds downloaded by Glacier |
+| `~/.local/share/glacier/runtimes/` | Steam Linux Runtime (only when Steam's copy isn't found) |
+| `~/.local/state/glacier/logs/` | one log per launch; `stats.json` holds playtime |
+| `~/.local/share/applications/glacier-*.desktop` | menu entries (`X-Glacier-Managed=true`) |
+
+If you set a *game library folder*, Glacier maps it to a Windows drive (`D:` by default) and
+makes it Battle.net's default install location, so big games can live on another disk.
+
+## Limitations
+
+* Logging in to Battle.net (and any 2FA) is up to you; Glacier never handles credentials.
+* Games with kernel anti-cheat that rejects Proton (Call of Duty's Ricochet) won't run online.
+* Settings such as MangoHud or env vars apply when Battle.net starts. Glacier restarts the
+  client automatically when they change, but only if no game is running.
+
+## Development
+
+```bash
+podman build -t glacier-test -f tools/Containerfile.test tools
+podman run --rm -v "$PWD":/src:Z,ro glacier-test sh -c 'python -m pytest -q -p no:cacheprovider && ruff check --no-cache glacier tests tools'
+python3 tools/make_icon.py   # re-render the app icon
+```
+
+Code map: `engine.py` (Proton commands, prefix, processes), `proton.py` (runner/runtime
+discovery and downloads), `battlenet.py` (client install/launch), `library.py` (games, icons,
+menus), `blizzard.py` (product.db, .build.info, version service), `pe.py` (icon extraction),
+`x11.py` + `watcher.py` (window tagging, playtime), `gui/` (PyQt6 interface), `cli.py`.
