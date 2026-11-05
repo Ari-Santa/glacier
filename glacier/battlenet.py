@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import locale
 import os
@@ -49,6 +50,88 @@ def detect_language() -> str:
     if code in LOCALES:
         return code
     return LANG_DEFAULT.get(m.group(1), "enUS")
+
+
+REGIONS = ("us", "eu", "kr", "tw", "cn")
+GEOIP_URL = "http://nydus.battle.net/geoip"     # what Battle.net-Setup.exe itself asks
+_AMERICAS_OCEANIA = {"US", "CA", "MX", "BR", "AR", "CL", "CO", "PE", "VE", "UY", "AU", "NZ"}
+_EU_ASIA_ZONES = {"Dubai", "Riyadh", "Qatar", "Bahrain", "Kuwait", "Muscat", "Tehran", "Baghdad",
+                  "Jerusalem", "Tel_Aviv", "Beirut", "Amman", "Damascus", "Nicosia", "Famagusta",
+                  "Istanbul", "Tbilisi", "Yerevan", "Baku"}
+
+
+def _system_timezone() -> str:
+    tz = os.environ.get("TZ", "").lstrip(":")
+    if "/" in tz:
+        return tz
+    try:
+        target = os.readlink("/etc/localtime")
+        return target.split("zoneinfo/", 1)[1] if "zoneinfo/" in target else ""
+    except OSError:
+        pass
+    try:
+        return Path("/etc/timezone").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _region_from_timezone(tz: str) -> str:
+    area, _, city = tz.partition("/")
+    if area in ("Europe", "Africa"):
+        return "eu"
+    if area == "Atlantic":
+        return "us" if city in ("Bermuda", "Stanley", "South_Georgia") else "eu"
+    if area in ("America", "Pacific", "Australia", "Antarctica", "US", "Canada", "Brazil"):
+        return "us"
+    if area == "Asia":
+        if city in _EU_ASIA_ZONES:
+            return "eu"
+        if city in ("Taipei", "Hong_Kong", "Macau"):
+            return "tw"
+        if city in ("Shanghai", "Chongqing", "Harbin", "Urumqi"):
+            return "cn"
+        return "kr"
+    return ""
+
+
+def _region_from_locale(lang: str) -> str:
+    m = re.match(r"[a-z]{2,3}_([A-Z]{2})", lang or "")
+    if not m:
+        return ""
+    country = m.group(1)
+    if country in _AMERICAS_OCEANIA:
+        return "us"
+    return {"KR": "kr", "TW": "tw", "HK": "tw", "MO": "tw", "CN": "cn", "JP": "kr"}.get(country, "eu")
+
+
+def _region_from_geoip(timeout: float = 5.0) -> str:
+    import requests
+    try:
+        r = requests.get(GEOIP_URL, timeout=timeout, allow_redirects=False)
+    except requests.RequestException:
+        return ""
+    country = r.headers.get("X-Geoip-Country", "").strip().lower()
+    region = r.headers.get("X-Geoip-Region", "").strip().lower()
+    # Unknown addresses come back as country "(null)" with region "us": not an answer.
+    if country and country != "(null)" and region in REGIONS:
+        return region
+    return ""
+
+
+@functools.lru_cache(maxsize=1)
+def _detect_region_cached() -> str:
+    return (_region_from_geoip() or _region_from_timezone(_system_timezone())
+            or _region_from_locale(os.environ.get("LC_ALL") or os.environ.get("LANG", "")) or "us")
+
+
+def detect_region(geoip: bool = True, tz: str | None = None, lang: str | None = None) -> str:
+    """Battle.net region for this machine: geo-IP if Blizzard knows us, else timezone, else locale."""
+    if geoip and tz is None and lang is None:
+        return _detect_region_cached()
+    tz = _system_timezone() if tz is None else tz
+    lang = (os.environ.get("LC_ALL") or os.environ.get("LANG", "")) if lang is None else lang
+    return ((_region_from_geoip() if geoip else "") or _region_from_timezone(tz)
+            or _region_from_locale(lang) or "us")
 
 
 @dataclass
@@ -99,12 +182,28 @@ class BattleNet:
         return pe.version_info(self.exe).get("FileVersion", "") if self.installed() else ""
 
     def region(self) -> str:
+        """Region Battle.net patches and logs in from (lower case: us, eu, kr, tw, cn)."""
         if self.cfg["region"]:
             return self.cfg["region"].lower()
+        login = self.login_region()
+        if login:
+            return login
         for p in self.products():
             if p.product_code in ("bna", "agent") and p.play_region:
                 return p.play_region.lower()
-        return "us"
+        return detect_region()
+
+    def login_region(self) -> str:
+        """Region the client last logged in to (it changes with --setregion)."""
+        try:
+            data = json.loads(self.config_file.read_text())
+        except (OSError, ValueError):
+            return ""
+        for v in data.values() if isinstance(data, dict) else ():
+            region = v.get("Services", {}).get("LastLoginRegion") if isinstance(v, dict) else None
+            if isinstance(region, str) and region.lower() in REGIONS:
+                return region.lower()
+        return ""
 
     def language(self) -> str:
         lang = self.cfg["language"]
@@ -131,10 +230,18 @@ class BattleNet:
             data = json.loads(self.config_file.read_text())
         except (OSError, ValueError):
             return False
-        for v in data.values():
-            if isinstance(v, dict) and isinstance(v.get("Client"), dict):
-                if v["Client"].get("SavedAccountNames") or v.get("Services", {}).get("LastCharacterInfo"):
-                    return True
+        if not isinstance(data, dict):
+            return False
+        # Current clients keep the account in the top-level Client section; per-install
+        # sections (keyed by a hash) carry Services.LastLogin* once someone has logged in.
+        sections = [data] + [v for v in data.values() if isinstance(v, dict)]
+        for v in sections:
+            client = v.get("Client")
+            services = v.get("Services")
+            if isinstance(client, dict) and client.get("SavedAccountNames"):
+                return True
+            if isinstance(services, dict) and (services.get("LastLoginRegion") or services.get("LastCharacterInfo")):
+                return True
         return False
 
     def status(self, check_latest: bool = False) -> BnetStatus:
@@ -182,7 +289,11 @@ class BattleNet:
         setup = self.download_installer(progress, cancel)
         if progress:
             progress("Installing Battle.net", -1)
-        args = [f"--lang={self.language()}", r"--installpath=C:\Program Files (x86)\Battle.net"]
+        # Pass the region explicitly: the installer otherwise asks nydus.battle.net/geoip, which
+        # answers "us" for addresses it can't place, and a US client can't adopt EU game folders.
+        region = (self.cfg["region"] or detect_region()).upper()
+        args = [f"--lang={self.language()}", f"--locale={self.language()}", f"--region={region}",
+                r"--installpath=C:\Program Files (x86)\Battle.net"]
         spec = self.engine.build(setup, args, verb="waitforexitandrun", log_name="battlenet-setup")
         proc, log = self.engine.spawn(spec)
         self._write_session(self.engine.fingerprint(None))
@@ -226,11 +337,18 @@ class BattleNet:
         else:
             client["HardwareAcceleration"] = "false"
         # Point new installs at the game library drive unless the user picked a folder already.
+        # Battle.net reads Client.Install.DefaultInstallPath (and writes it from its settings
+        # dialog); Glacier <= 0.1.0 wrote Client.DefaultInstallPath, which Battle.net ignores.
         lib = self.engine.library_dir()
         letter = (self.cfg["library_drive"] or "d").upper()[:1]
         managed = {f"{c}:/" for c in "DEFGHIJKLMNOPQRSTUVWXY"}
-        if lib and (not client.get("DefaultInstallPath") or client.get("DefaultInstallPath") in managed):
-            client["DefaultInstallPath"] = f"{letter}:/"
+        if client.get("DefaultInstallPath") in managed:
+            client.pop("DefaultInstallPath")
+        install = client.setdefault("Install", {})
+        if lib and (not install.get("DefaultInstallPath") or install.get("DefaultInstallPath") in managed):
+            install["DefaultInstallPath"] = f"{letter}:/"
+        if not install:
+            client.pop("Install")
         if json.dumps(data, sort_keys=True) == before:
             return
         tmp = f.with_suffix(".glacier-tmp")
@@ -268,6 +386,10 @@ class BattleNet:
                                      wrap=False)
         else:
             self.apply_config()
+            wanted = (self.cfg["region"] or "").lower()
+            if wanted in REGIONS and wanted != self.login_region():
+                # Glacier's Region setting: switch the client (login + patch region) over.
+                args = [f"--setregion={wanted.upper()}", *args]
             spec = self.engine.build(self.exe, args, uid=uid, verb="auto",
                                      log_name=log_name)
             self._write_session(fp)

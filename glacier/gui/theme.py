@@ -21,6 +21,7 @@ STATUS_COLORS = {
     "Running": OK,
     "Ready": TEXT,
     "Update available": WARN,
+    "Not in Battle.net": WARN,
     "Not installed": MUTED,
 }
 

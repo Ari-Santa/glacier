@@ -196,6 +196,9 @@ class GameDetail(QFrame):
         if st.running:
             self.play.setText("Stop")
             self.play.setProperty("kind", "danger")
+        elif st.needs_locate and self.win.core.cfg.game(st.uid)["launch_mode"] != "direct":
+            self.play.setText("Add to Battle.net")
+            self.play.setProperty("kind", "primary")
         elif st.installed:
             self.play.setText("Play")
             self.play.setProperty("kind", "primary")
@@ -722,7 +725,10 @@ class SettingsPage(QWidget):
             self.region.addItem(text, val)
         self.region.setCurrentIndex(max(0, self.region.findData(cfg["region"])))
         self.region.currentIndexChanged.connect(lambda: self._set("region", self.region.currentData()))
-        form.addRow("Region for update checks", self.region)
+        self.region.setToolTip("Where Battle.net logs in and downloads patches from. Automatic uses "
+                               "Blizzard's geo-IP, then your timezone. A specific region is applied "
+                               "the next time Glacier starts Battle.net.")
+        form.addRow("Region", self.region)
         lay.addWidget(box)
 
         box = QGroupBox("Game launch options (global)")

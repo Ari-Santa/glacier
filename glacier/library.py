@@ -16,6 +16,11 @@ from .games import GameDef
 
 BNET_UID = "battlenet"
 IGNORED_PRODUCTS = {"agent", "bna", "battle.net", "bts", "catalogs"}
+NOT_REGISTERED = "Not in Battle.net"
+
+
+class NotRegisteredError(EngineError):
+    """The game is on disk but Battle.net doesn't know about it, so it can't launch it."""
 
 
 @dataclass
@@ -38,6 +43,11 @@ class GameState:
         return self.game.uid
 
     @property
+    def needs_locate(self) -> bool:
+        """Files are on disk (e.g. copied in) but Battle.net hasn't registered the game."""
+        return self.installed and not self.db_uid
+
+    @property
     def update_available(self) -> bool:
         return bool(self.installed and self.latest and self.version and self.latest != self.version)
 
@@ -50,6 +60,8 @@ class GameState:
             return f"{verb} {self.progress * 100:.0f}%"
         if not self.installed:
             return "Not installed"
+        if self.needs_locate:
+            return NOT_REGISTERED
         if self.update_available:
             return "Update available"
         return "Ready"
@@ -317,8 +329,11 @@ class Library:
         if not st.installed:
             raise EngineError(f"{st.game.name} is not installed. Use 'install' to get it via Battle.net.")
         gcfg = self.cfg.game(st.uid)
+        direct = gcfg["launch_mode"] == "direct" and st.exe
+        if st.needs_locate and not direct:
+            raise NotRegisteredError(self.locate_hint(st))
         stats.touch(st.uid)
-        if gcfg["launch_mode"] == "direct" and st.exe:
+        if direct:
             args = shlex.split(gcfg.get("args") or "")
             spec = self.engine.build(st.exe, args, uid=st.uid, verb="auto",
                                      install_dir=st.install_dir, log_name=st.uid)
@@ -343,6 +358,15 @@ class Library:
     def open_in_bnet(self, key: str):
         st = self.get(key)
         return self.bnet.exec(f"focus {st.game.launch}", log_name="battlenet")
+
+    def locate_hint(self, st: GameState) -> str:
+        """How to make Battle.net adopt a game folder it doesn't know about."""
+        where = self.engine.unix_to_win(st.install_dir) if st.install_dir else st.game.folder
+        return (f"{st.game.name} is in {where} but Battle.net hasn't registered it yet. "
+                f"In Battle.net, select {st.game.name}, click \"Locate the game\" under the Install "
+                f"button and choose {where} (use the drive letter, not Z:). If that fails, click "
+                f"Install with the same parent folder; Battle.net reuses the files and only "
+                f"downloads what changed.")
 
     def uninstall_command(self, key: str) -> tuple[str, list[str]] | None:
         """Uninstaller registered in the prefix registry for this game, if any."""

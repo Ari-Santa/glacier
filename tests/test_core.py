@@ -316,3 +316,77 @@ def test_config_roundtrip(tmp_path: Path):
     assert c2.game("wow")["launch_mode"] == "direct"
     c2.set_game("wow", launch_mode="bnet")       # back to default -> entry removed
     assert "wow" not in Config(tmp_path / "c.json").data["games"]
+
+
+# ----------------------------------------------------------------------------- Battle.net config
+
+def _bnet_config(engine: Engine, data: dict):
+    import json
+
+    from glacier.battlenet import BattleNet
+    bn = BattleNet(engine)
+    bn.config_file.parent.mkdir(parents=True, exist_ok=True)
+    bn.config_file.write_text(json.dumps(data))
+    return bn
+
+
+def test_logged_in_hint_top_level_client(engine: Engine):
+    # Battle.net 2.5x keeps the remembered account in the top-level Client section.
+    bn = _bnet_config(engine, {"Client": {"SavedAccountNames": "someone@example.com"}})
+    assert bn.logged_in_hint()
+    bn = _bnet_config(engine, {"5a61123b37cafce1": {"Services": {"LastLoginRegion": "US"}}})
+    assert bn.logged_in_hint()
+    bn = _bnet_config(engine, {"Client": {"Version": {"FirstRun": "false"}}})
+    assert not bn.logged_in_hint()
+
+
+def test_apply_config_default_install_path(engine: Engine):
+    import json
+    # Legacy Glacier key is replaced by the one Battle.net actually reads.
+    bn = _bnet_config(engine, {"Client": {"DefaultInstallPath": "D:/", "AutoLogin": "true"}})
+    bn.apply_config()
+    client = json.loads(bn.config_file.read_text())["Client"]
+    assert "DefaultInstallPath" not in client
+    assert client["Install"]["DefaultInstallPath"] == "D:/"
+    assert client["AutoLogin"] == "true"
+    # A folder the user picked in Battle.net's settings is left alone.
+    bn = _bnet_config(engine, {"Client": {"Install": {"DefaultInstallPath": "C:/Games/"}}})
+    bn.apply_config()
+    assert json.loads(bn.config_file.read_text())["Client"]["Install"]["DefaultInstallPath"] == "C:/Games/"
+
+
+def test_copied_in_game_needs_locate(engine: Engine, tmp_path: Path):
+    from glacier.battlenet import BattleNet
+    from glacier.library import NOT_REGISTERED, GameState, Library, NotRegisteredError
+    wow = games.lookup("wow")
+    st = GameState(wow, installed=True, install_dir=tmp_path / "library" / "World of Warcraft",
+                   version="12.1.0.69933", latest="12.1.5.70783")
+    assert st.needs_locate and st.status_text == NOT_REGISTERED
+    lib = Library(engine, BattleNet(engine))
+    lib.states = {"wow": st}
+    with pytest.raises(NotRegisteredError, match=r"D:\\World of Warcraft"):
+        lib.launch("wow")
+    st.db_uid = "wow"
+    assert not st.needs_locate and st.status_text == "Update available"
+
+
+def test_detect_region_offline():
+    from glacier.battlenet import detect_region
+    assert detect_region(geoip=False, tz="Europe/Oslo", lang="nb_NO.UTF-8") == "eu"
+    assert detect_region(geoip=False, tz="America/Sao_Paulo", lang="pt_BR.UTF-8") == "us"
+    assert detect_region(geoip=False, tz="Australia/Sydney", lang="en_AU.UTF-8") == "us"
+    assert detect_region(geoip=False, tz="Asia/Seoul", lang="ko_KR.UTF-8") == "kr"
+    assert detect_region(geoip=False, tz="Asia/Taipei", lang="zh_TW.UTF-8") == "tw"
+    assert detect_region(geoip=False, tz="Asia/Dubai", lang="ar_AE.UTF-8") == "eu"
+    # No timezone: fall back to the locale's country, then to us.
+    assert detect_region(geoip=False, tz="", lang="de_DE.UTF-8") == "eu"
+    assert detect_region(geoip=False, tz="", lang="en_US.UTF-8") == "us"
+    assert detect_region(geoip=False, tz="", lang="C") == "us"
+
+
+def test_login_region_and_setregion(engine: Engine):
+    bn = _bnet_config(engine, {"5a61123b37cafce1": {"Services": {"LastLoginRegion": "EU"}}})
+    assert bn.login_region() == "eu"
+    assert bn.region() == "eu"
+    engine.cfg["region"] = "us"
+    assert bn.region() == "us"
