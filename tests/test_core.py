@@ -419,6 +419,100 @@ def test_config_roundtrip(tmp_path: Path):
     assert "wow" not in Config(tmp_path / "c.json").data["games"]
 
 
+# ----------------------------------------------------------------------------- Proton
+
+def test_ge_tag_strips_arch_suffix():
+    from glacier import proton
+    assert proton.ge_tag("GE-Proton11-12-x86_64") == "GE-Proton11-12"
+    assert proton.ge_tag("GE-Proton11-12-aarch64") == "GE-Proton11-12"
+    assert proton.ge_tag("GE-Proton10-25") == "GE-Proton10-25"
+
+
+def test_update_ge_skips_installed_arch_build(tmp_path: Path, monkeypatch):
+    # GE-Proton11-12's x86_64 tarball unpacks to GE-Proton11-12-x86_64: still the same release.
+    from glacier import core as core_mod, paths, proton
+    runners = tmp_path / "runners"
+    (runners / "GE-Proton11-12-x86_64").mkdir(parents=True)
+    (runners / "GE-Proton11-12-x86_64" / "proton").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(paths, "RUNNERS_DIR", runners)
+    monkeypatch.setattr(proton, "steam_roots", lambda: [])
+    rel = proton.Release("GE-Proton11-12", "2026-11-03", "https://example.invalid/GE-Proton11-12-x86_64.tar.gz",
+                         "GE-Proton11-12-x86_64.tar.gz", 540 << 20, None)
+    monkeypatch.setattr(proton, "list_ge_releases", lambda limit=10: [rel])
+    monkeypatch.setattr(proton, "install_ge", lambda *a, **k: pytest.fail("downloaded an installed release again"))
+    assert proton.installed_ge_tags() == {"GE-Proton11-12"}
+    assert core_mod.Core(Config(tmp_path / "cfg.json")).update_ge() is None
+
+
+def test_match_runner_by_tag_prefers_glacier_copy():
+    from glacier import proton
+    steam = proton.Runner("compattools:GE-Proton11-12", "GE-Proton11-12", Path("/s/GE-Proton11-12"), "compattools")
+    ours = proton.Runner("glacier:GE-Proton11-12-x86_64", "GE-Proton11-12-x86_64",
+                         Path("/g/GE-Proton11-12-x86_64"), "glacier")
+    valve = proton.Runner("steam:Proton 11.0", "Proton 11.0", Path("/s/Proton 11.0"), "steam")
+    runners = [steam, ours, valve]
+    assert proton.match_runner(runners, "GE-Proton11-12") is ours
+    assert proton.match_runner(runners, "compattools:GE-Proton11-12") is steam
+    assert proton.match_runner(runners, "Proton 11.0") is valve
+    assert proton.match_runner(runners, "GE-Proton11-11") is None
+
+
+def test_vulkan32_available(tmp_path: Path, monkeypatch):
+    import json
+
+    from glacier import proton
+    monkeypatch.delenv("VK_DRIVER_FILES", raising=False)
+    monkeypatch.delenv("VK_ICD_FILENAMES", raising=False)
+    icd, lib64, lib32 = tmp_path / "icd.d", tmp_path / "lib64", tmp_path / "lib32"
+    for d in (icd, lib64, lib32):
+        d.mkdir()
+
+    def check():
+        return proton.vulkan32_available((str(icd), str(tmp_path / "missing")), (str(lib32),))
+
+    assert check() is None                       # no Vulkan driver manifests: can't tell
+    # Debian 13 Mesa: one manifest naming the library without a path, only the 64-bit one installed.
+    (icd / "lvp_icd.json").write_text(json.dumps({"ICD": {"library_path": "libvulkan_lvp.so"}}))
+    (lib64 / "libvulkan_lvp.so").write_bytes(b"\x7fELF\x02\x01\x01")
+    assert check() is False
+    (lib32 / "libvulkan_lvp.so").write_bytes(b"\x7fELF\x02\x01\x01")   # wrong class in a 32-bit dir
+    assert check() is False
+    (lib32 / "libvulkan_lvp.so").write_bytes(b"\x7fELF\x01\x01\x01")   # mesa-vulkan-drivers:i386
+    assert check() is True
+    # Arch/Fedora style: a manifest per architecture with an absolute path.
+    (lib32 / "libvulkan_lvp.so").unlink()
+    (icd / "radeon_icd.i686.json").write_text(json.dumps({"ICD": {"library_path": str(lib64 / "r32.so")}}))
+    assert check() is False
+    (lib64 / "r32.so").write_bytes(b"\x7fELF\x01\x01\x01")
+    assert check() is True
+    (icd / "broken.json").write_text("{")
+    assert check() is True
+    monkeypatch.setenv("VK_DRIVER_FILES", "/somewhere/else.json")
+    assert check() is None
+
+
+def test_cli_progress_without_terminal(monkeypatch, capsys):
+    from glacier import cli, proton
+    clock = [100.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    report = cli._progress()                     # capsys: stderr is not a terminal
+    for mib in range(1, 541):
+        report(f"Downloading GE-Proton11-12 ({mib} / 540 MiB)", mib / 540)
+        clock[0] += 0.05                         # 27 s for the whole download
+    report("Verifying GE-Proton11-12", -1)
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0] == "Downloading GE-Proton11-12 (1 / 540 MiB) (0%)"
+    assert lines[-2:] == ["Downloading GE-Proton11-12 (540 / 540 MiB) (100%)", "Verifying GE-Proton11-12"]
+    assert 4 <= len(lines) <= 6                  # one line per MiB before
+
+    monkeypatch.setattr(proton, "vulkan32_available", lambda: False)
+    cli._warn_vulkan32()
+    assert "mesa-vulkan-drivers:i386" in capsys.readouterr().err
+    monkeypatch.setattr(proton, "vulkan32_available", lambda: None)
+    cli._warn_vulkan32()
+    assert capsys.readouterr().err == ""
+
+
 # ----------------------------------------------------------------------------- Battle.net config
 
 def _bnet_config(engine: Engine, data: dict):
@@ -435,10 +529,21 @@ def test_logged_in_hint_top_level_client(engine: Engine):
     # Battle.net 2.5x keeps the remembered account in the top-level Client section.
     bn = _bnet_config(engine, {"Client": {"SavedAccountNames": "someone@example.com"}})
     assert bn.logged_in_hint()
-    bn = _bnet_config(engine, {"5a61123b37cafce1": {"Services": {"LastLoginRegion": "US"}}})
+    bn = _bnet_config(engine, {"5a61123b37cafce1": {"Services": {"LastCharacterInfo": "x"}}})
     assert bn.logged_in_hint()
     bn = _bnet_config(engine, {"Client": {"Version": {"FirstRun": "false"}}})
     assert not bn.logged_in_hint()
+
+
+def test_logged_in_hint_fresh_install(engine: Engine):
+    # What Battle.net 2.53 writes on its first start, before anyone logs in (Debian 13 test).
+    bn = _bnet_config(engine, {
+        "Client": {"Version": {"FirstRun": "false", "Release": {"FirstRun": "false"}}},
+        "5a61123b37cafce1": {"Client": {"Language": "enUS"}, "Path": "C:\\Program Files (x86)\\Battle.net",
+                             "Services": {"LastLoginRegion": "US"}},
+    })
+    assert not bn.logged_in_hint()
+    assert bn.login_region() == "us"
 
 
 def test_apply_config_default_install_path(engine: Engine):

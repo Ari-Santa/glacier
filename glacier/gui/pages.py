@@ -782,7 +782,7 @@ class ProtonPage(QWidget):
 
     def _fill_releases(self):
         self.releases.clear()
-        installed = {r.path.name: r for r in self.win.core.engine.runners() if r.is_ge}
+        installed = {proton.ge_tag(r.path.name): r for r in self.win.core.engine.runners() if r.is_ge}
         for rel in self._releases:
             tag = "  ✓ installed" if rel.tag in installed else ""
             it = QListWidgetItem(f"{rel.tag}    {rel.published}    {rel.size >> 20} MiB{tag}")
@@ -806,7 +806,7 @@ class ProtonPage(QWidget):
 
     def _remove_selected(self):
         tag = self._selected_tag()
-        r = next((r for r in self.win.core.engine.runners() if r.path.name == tag), None)
+        r = proton.match_runner(self.win.core.engine.runners(), tag) if tag else None
         if r:
             self.win.remove_runner(r)
 

@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
         self._clear_status_when: str | None = None   # uid whose start ends the current status text
         self._quitting = False
         self.bnet_status = self.core.bnet.status()
+        self.vulkan32 = proton.vulkan32_available()
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
@@ -412,6 +413,9 @@ class MainWindow(QMainWindow):
         elif self.tasks.running("runtime"):
             t = self.tasks.active["runtime"]
             page.set_banner("Preparing Proton", t.message, "", None, t.fraction, bn_pm)
+        elif self.vulkan32 is False:
+            page.set_banner("32-bit Vulkan driver missing", proton.VULKAN32_HINT, "Check again",
+                            self.recheck_vulkan32, None, bn_pm)
         elif not self.bnet_status.installed:
             text = "Glacier downloads the official installer and installs it unattended."
             if self._last_error:
@@ -466,6 +470,12 @@ class MainWindow(QMainWindow):
             self.proton_page.refresh()
             self.update_banner()
         self.tasks.start("Preparing Proton", lambda p, c: self.core.ensure_runner(p, c), done, key="runtime")
+
+    def recheck_vulkan32(self):
+        self.vulkan32 = proton.vulkan32_available()
+        if self.vulkan32 is not False:
+            self.set_status("32-bit Vulkan driver found")
+        self.update_banner()
 
     def start_battlenet(self, background: bool = False):
         if not self.core.bnet.installed():
