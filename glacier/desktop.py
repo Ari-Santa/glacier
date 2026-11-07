@@ -34,6 +34,40 @@ def _best_frame(ico: Image.Image, size: int) -> Image.Image:
     return ico.convert("RGBA")
 
 
+def ico_max_size(ico_bytes: bytes) -> int:
+    """Width of the largest frame in .ico data (0 when it can't be read)."""
+    try:
+        ico = Image.open(io.BytesIO(ico_bytes))
+        return max(s[0] for s in ico.info.get("sizes", {ico.size}))
+    except (OSError, ValueError):
+        return 0
+
+
+def _app_shape(img: Image.Image) -> Image.Image:
+    """Square the picture up, and round the corners of an opaque tile like other app icons."""
+    img = img.convert("RGBA")
+    w, h = img.size
+    if w != h:
+        side = max(w, h)
+        square = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        square.paste(img, ((side - w) // 2, (side - h) // 2))
+        img, w = square, side
+    corners = ((0, 0), (w - 1, 0), (0, w - 1), (w - 1, w - 1))
+    if min(img.getpixel(c)[3] for c in corners) < 255:
+        return img            # already shaped (transparent around the emblem)
+    big = w * 4
+    mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, big - 1, big - 1), radius=big // 5, fill=255)
+    img.putalpha(mask.resize((w, w), Image.LANCZOS))
+    return img
+
+
+def image_to_images(img: Image.Image) -> dict[int, Image.Image]:
+    """RGBA images for each standard size from one large picture (Battle.net's product art)."""
+    img = _app_shape(img)
+    return {s: img.resize((s, s), Image.LANCZOS) if img.size != (s, s) else img for s in ICON_SIZES}
+
+
 def ico_to_images(ico_bytes: bytes) -> dict[int, Image.Image]:
     """Return RGBA images for each standard size from .ico data."""
     src = Image.open(io.BytesIO(ico_bytes))
@@ -107,6 +141,10 @@ def install_icon_images(name: str, images: dict[int, Image.Image]) -> Path:
 
 def install_icon_from_ico(name: str, ico_bytes: bytes) -> Path:
     return install_icon_images(name, ico_to_images(ico_bytes))
+
+
+def install_icon_from_image(name: str, img: Image.Image) -> Path:
+    return install_icon_images(name, image_to_images(img))
 
 
 def install_placeholder_icon(name: str, initials: str, color: str) -> Path:

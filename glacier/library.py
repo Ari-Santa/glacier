@@ -9,6 +9,8 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from PIL import Image
+
 from . import blizzard, desktop, games, paths, pe, stats
 from .battlenet import BNET_HELPERS, SYSTEM_EXES, BattleNet
 from .engine import Engine, EngineError
@@ -245,7 +247,9 @@ class Library:
         name = desktop.icon_name(st.uid)
         png = paths.ICONS_DIR / f"{name}.png"
         marker = paths.ICONS_DIR / f"{name}.src"
-        src = str(st.exe) if st.exe else "placeholder"
+        # Battle.net's own big icon for the product: some games (retail WoW) ship only 48 px in the exe.
+        art = self.bnet.product_icon(st.game.launch)
+        src = (str(st.exe) if st.exe else "placeholder") + (f"|{art.name}" if art else "")
         try:
             up_to_date = png.exists() and marker.read_text() == src
         except OSError:
@@ -260,15 +264,30 @@ class Library:
                     ico = pe.extract_icon(c)
                     if ico:
                         break
-        if ico:
+        art_img = None
+        if art:
             try:
-                png = desktop.install_icon_from_ico(name, ico)
+                with Image.open(art) as im:
+                    art_img = im.convert("RGBA") if min(im.size) >= 128 else None
+            except (OSError, ValueError):
+                art_img = None
+        made = False
+        # The art only wins where the exe can't fill the biggest size we install (256 px).
+        if art_img is not None and (not ico or desktop.ico_max_size(ico) < min(art_img.width,
+                                                                            desktop.ICON_SIZES[-1])):
+            try:
+                png, made = desktop.install_icon_from_image(name, art_img), True
             except Exception:
-                ico = None
-        if not ico:
+                made = False
+        if not made and ico:
+            try:
+                png, made = desktop.install_icon_from_ico(name, ico), True
+            except Exception:
+                made = False
+        if not made:
             png = desktop.install_placeholder_icon(name, st.game.initials, st.game.color)
         paths.ICONS_DIR.mkdir(parents=True, exist_ok=True)
-        marker.write_text(src if ico else "placeholder")
+        marker.write_text(src if made else "placeholder")
         return png
 
     def ensure_bnet_icon(self) -> Path:

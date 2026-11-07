@@ -229,6 +229,79 @@ def test_exec_quoting():
     assert desktop._quote_exec('x"y$z') == '"x\\"y\\$z"'
 
 
+def _cache_file(cache: Path, data: bytes) -> str:
+    digest = hashlib.md5(data).hexdigest()
+    f = cache / digest[:2] / digest[2:4] / digest
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(data)
+    return digest
+
+
+def _battlenet_icon_cache(cache: Path) -> None:
+    """A Battle.net client cache with the World of Warcraft manifest and two big icons."""
+    import json
+    wow = _cache_file(cache, _png(275, (31, 44, 71, 255)))
+    wowc = _cache_file(cache, _png(275, (0, 0, 0, 0)))
+    manifest = {
+        "fragment_id": "world_of_warcraft",
+        "products": [
+            {"id": "WoW", "base": {"icon_medium": "world_of_warcraft#WOW_ICON_MEDIUM",
+                                   "icon_svg": "world_of_warcraft#WOW_ICON_SVG"}},
+            {"id": "WoWC", "base": {"icon_svg": "world_of_warcraft#WOW_CLASSIC_MOP_ICON_SVG"}},
+            {"id": "WoWF", "base": {"icon_svg": "world_of_warcraft#WOW_FOREVER_ICON_SVG"}},
+        ],
+        "files": {"default": {
+            "world_of_warcraft#WOW_ICON_MASSIVE": {"hash": wow, "name": "resources/wow/icon_game_wow_massive.png"},
+            "world_of_warcraft#WOWC_ICON_MASSIVE": {"hash": wowc, "name": "resources/wow/icon_game_wowc_massive.png"},
+            "world_of_warcraft#WOWF_ICON_MASSIVE": {"hash": "0" * 32, "name": "not cached"},
+        }},
+    }
+    _cache_file(cache, json.dumps(manifest).encode())
+    _cache_file(cache, b"\x89PNG not json")
+
+
+def test_product_icons_from_battlenet_cache(tmp_path: Path):
+    from PIL import Image
+
+    from glacier.battlenet import product_icons
+    _battlenet_icon_cache(tmp_path)
+    icons = product_icons(tmp_path)
+    assert set(icons) == {"wow", "wowc"}            # WoWF's file isn't in the cache
+    assert Image.open(icons["wow"]).size == (275, 275)
+    assert product_icons(tmp_path / "missing") == {}
+
+
+def test_game_icon_prefers_bigger_battlenet_art(engine: Engine, tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    from glacier import paths
+    from glacier.battlenet import BattleNet
+    from glacier.library import GameState, Library
+    monkeypatch.setattr(paths, "HICOLOR_DIR", tmp_path / "hicolor")
+    monkeypatch.setattr(paths, "ICONS_DIR", tmp_path / "icons")
+    bnet = BattleNet(engine)
+    _battlenet_icon_cache(bnet.cache_dir)
+    root = tmp_path / "library" / "World of Warcraft"
+    exe = root / "_retail_" / "Wow.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(_build_pe({1: (_png(48, (255, 0, 0, 255)), 48)}))
+    lib = Library(engine, bnet)
+    st = GameState(games.lookup("wow"), installed=True, install_dir=root, exe=exe)
+
+    png = lib.ensure_icon(st)               # 48 px in the exe, 275 px from Battle.net: Battle.net wins
+    im = Image.open(png)
+    assert im.size == (256, 256)
+    assert im.getpixel((128, 128))[:3] == (31, 44, 71)
+    assert im.getpixel((0, 0))[3] == 0      # the opaque tile got rounded corners
+    assert (tmp_path / "icons" / "glacier-wow.src").read_text().endswith("|" + bnet.product_icon("WoW").name)
+    stamp = png.stat().st_mtime_ns
+    assert lib.ensure_icon(st).stat().st_mtime_ns == stamp      # unchanged inputs: not rebuilt
+
+    exe.write_bytes(_build_pe({1: (_png(256, (255, 0, 0, 255)), 256)}))
+    png = lib.ensure_icon(st, force=True)   # a 256 px exe icon is kept over the art
+    assert Image.open(png).getpixel((128, 128))[:3] == (255, 0, 0)
+
+
 def test_placeholder_icon():
     im = desktop.placeholder("WoW", "#2c5aa0", 64)
     assert im.size == (64, 64)

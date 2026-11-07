@@ -149,10 +149,62 @@ class BnetStatus:
     agent_version: str
 
 
+ICON_INDEX_TTL = 60.0     # seconds before Battle.net's cache is looked at again for product icons
+
+
+def product_icons(cache: Path) -> dict[str, Path]:
+    """Battle.net's large (275 px) product icons in its client cache, by lower-case product id.
+
+    The client stores downloaded files under Cache/ab/cd/<hash>. Among them are JSON manifests
+    with "products" and "files": a product's "base" names its icons by key (icon_medium =
+    "world_of_warcraft#WOW_ICON_MEDIUM"), and "files"/"default" maps each key to the hash of
+    the cached file. The big variant has the _MASSIVE key, which products don't name directly,
+    so it is derived from icon_medium or from the product id (WoWC -> WOWC_ICON_MASSIVE).
+    """
+    try:
+        files = sorted((p for p in cache.glob("??/??/*") if p.is_file()),
+                       key=lambda p: p.stat().st_mtime, reverse=True)   # newest manifest wins
+    except OSError:
+        return {}
+    icons: dict[str, Path] = {}
+    for f in files:
+        try:
+            with f.open("rb") as fh:
+                if fh.read(1) != b"{":
+                    continue
+                data = json.loads(b"{" + fh.read())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("products"), list):
+            continue
+        table = (data.get("files") or {}).get("default") if isinstance(data.get("files"), dict) else None
+        if not isinstance(table, dict):
+            continue
+        for prod in data["products"]:
+            pid = prod.get("id") if isinstance(prod, dict) else None
+            base = prod.get("base") if isinstance(prod, dict) else None
+            if not isinstance(pid, str) or not isinstance(base, dict) or pid.lower() in icons:
+                continue
+            refs = [v for k, v in base.items() if k.startswith("icon_") and isinstance(v, str) and "#" in v]
+            keys = [r.replace("_ICON_MEDIUM", "_ICON_MASSIVE", 1) for r in refs if "_ICON_MEDIUM" in r]
+            keys += [f"{prefix}#{pid.upper()}_ICON_MASSIVE" for prefix in {r.split("#", 1)[0] for r in refs}]
+            for key in keys:
+                entry = table.get(key)
+                digest = entry.get("hash") if isinstance(entry, dict) else None
+                if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{8,64}", digest):
+                    cached = cache / digest[:2] / digest[2:4] / digest
+                    if cached.is_file():
+                        icons[pid.lower()] = cached
+                        break
+    return icons
+
+
 class BattleNet:
     def __init__(self, engine: Engine):
         self.engine = engine
         self.cfg = engine.cfg
+        self._icons: dict[str, Path] = {}
+        self._icons_at = 0.0
 
     # ------------------------------------------------------------------ paths
     @property
@@ -170,6 +222,17 @@ class BattleNet:
     @property
     def config_file(self) -> Path:
         return self.engine.drive_c / "users" / "steamuser" / "AppData" / "Roaming" / "Battle.net" / "Battle.net.config"
+
+    @property
+    def cache_dir(self) -> Path:
+        return self.engine.drive_c / "users" / "steamuser" / "AppData" / "Local" / "Battle.net" / "Cache"
+
+    def product_icon(self, product: str) -> Path | None:
+        """Battle.net's own 275 px icon for a product code (WoW, Pro, Fen…), when it has one cached."""
+        now = time.monotonic()
+        if not self._icons_at or now - self._icons_at > ICON_INDEX_TTL:
+            self._icons, self._icons_at = product_icons(self.cache_dir), now
+        return self._icons.get(product.lower())
 
     def installed(self) -> bool:
         return self.exe.is_file()
