@@ -44,6 +44,7 @@ class MainWindow(QMainWindow):
         self._db_mtime = 0.0
         self._running: set[str] = set()
         self._last_error = ""
+        self._clear_status_when: str | None = None   # uid whose start ends the current status text
         self._quitting = False
         self.bnet_status = self.core.bnet.status()
 
@@ -262,6 +263,8 @@ class MainWindow(QMainWindow):
             self.tagger.tick(lib.owners(procs))
             self.tracker.tick(running)
         bnet_running = BNET_UID in running
+        if self._clear_status_when in running:   # "Battle.net is starting…" / "Launching X…" is over
+            self.set_status("")
         if running != self._running:
             self._running = running
             self.library_page.refresh_cards(lib.states)
@@ -339,7 +342,9 @@ class MainWindow(QMainWindow):
         rt = self.core.engine.runtime(r) if r else None
         self.status_runner.setText(f"{r.name if r else 'No Proton'}" + (f"  ·  {rt.name}" if rt else ""))
 
-    def set_status(self, text: str, error: bool = False):
+    def set_status(self, text: str, error: bool = False, clear_when: str | None = None):
+        """Show text in the status bar; with clear_when, poll() clears it once that uid is running."""
+        self._clear_status_when = clear_when
         self.status_msg.setText(text)
         self.status_msg.setStyleSheet(f"color: {theme.ERR if error else theme.MUTED};")
 
@@ -461,8 +466,18 @@ class MainWindow(QMainWindow):
             self.run_setup()
             return
         args = ["--runonstartup"] if background else []
-        self.tasks.start("Starting Battle.net", lambda p, c: self.core.bnet.launch(args),
-                         lambda _: self.set_status("Battle.net is starting…"), key="bnet-start", quiet=True)
+
+        def work(p, c):
+            self.core.bnet.launch(args)
+            return self.core.bnet.running()   # True: handed to the open client, which just shows itself
+
+        def done(handed_over):
+            if handed_over:
+                self.set_status("")
+            else:
+                self.set_status("Battle.net is starting…", clear_when=BNET_UID)
+
+        self.tasks.start("Starting Battle.net", work, done, key="bnet-start", quiet=True)
 
     def stop_all(self):
         self.tasks.start("Stopping Battle.net and games", lambda p, c: self.core.engine.kill_all(),
@@ -490,7 +505,8 @@ class MainWindow(QMainWindow):
                 p(f"Launching {name}…", -1)
                 return lib.launch(uid)
             self.tasks.start(f"Launching {name}", work,
-                             lambda _: self.set_status(f"Launching {name}…"), key=f"launch-{uid}", quiet=True)
+                             lambda _: self.set_status(f"Launching {name}…", clear_when=uid),
+                             key=f"launch-{uid}", quiet=True)
             self._flash_launch(uid)
         elif action == "stop":
             procs = self.core.engine.processes()
