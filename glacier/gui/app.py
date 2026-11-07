@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QFrame, QHBoxLayout, QL
 
 from .. import APP_ID, APP_NAME, __version__, desktop, paths, proton, selfupdate
 from ..core import Core
-from ..curseforge import CurseForge, sync_games
+from ..curseforge import CurseForge, start_failure, sync_games
 from ..engine import EngineError
 from ..library import BNET_UID
 from ..watcher import PlaytimeTracker, WatcherLock, WindowTagger, spawn_detached
@@ -599,8 +599,7 @@ class MainWindow(QMainWindow):
             timer.stop()
             timer.deleteLater()
             if code:
-                self.set_status(f"CurseForge didn't start (exit code {code}). See {log.name} on the Logs page.",
-                                error=True)
+                self.set_status(start_failure(code, log, f"See {log.name} on the Logs page."), error=True)
             elif self.status_msg.text() == text:
                 self.set_status("")
 

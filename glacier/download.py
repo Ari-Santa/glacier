@@ -7,6 +7,7 @@ import os
 import threading
 from pathlib import Path
 from collections.abc import Callable
+from urllib.parse import urlsplit
 
 import requests
 
@@ -17,6 +18,22 @@ ProgressFn = Callable[[int, int], None]   # (bytes_done, bytes_total or 0)
 
 class Cancelled(Exception):
     pass
+
+
+def describe_error(e: BaseException) -> str:
+    """Error text for the UI: a short sentence for network failures instead of urllib3's
+    'HTTPSConnectionPool(...): Max retries exceeded ...', anything else as it is."""
+    if isinstance(e, (requests.ConnectionError, requests.Timeout)):
+        req = getattr(e, "request", None)
+        host = urlsplit(getattr(req, "url", None) or "").hostname or "the server"
+        if isinstance(e, requests.Timeout):     # ConnectTimeout is a ConnectionError too
+            return f"{host} didn't answer in time. Check your internet connection and try again."
+        text = str(e)
+        if any(s in text for s in ("NameResolutionError", "Name or service not known",
+                                   "Temporary failure in name resolution", "No address associated")):
+            return f"Couldn't look up {host}. Check your internet connection and try again."
+        return f"Couldn't connect to {host}. Check your internet connection and try again."
+    return str(e) or e.__class__.__name__
 
 
 def session() -> requests.Session:

@@ -716,8 +716,17 @@ def cf_env(tmp_path: Path, monkeypatch):
     meta = curseforge.Metadata({"Name": "CurseForge", "StartupWMClass": "CurseForge",
                                 "MimeType": "x-scheme-handler/curseforge;x-scheme-handler/cfauth;",
                                 "X-AppImage-Version": "1.325.0-41594.41594"}, _png(64, (240, 100, 54, 255)))
-    monkeypatch.setattr(curseforge, "read_metadata", lambda path, info=None, timeout=120: meta)
-    state = {"body": _fake_appimage(b"hsqs" + b"build-1"), "corrupt": False, "downloads": 0}
+    state = {"body": _fake_appimage(b"hsqs" + b"build-1"), "corrupt": False, "downloads": 0,
+             "executable_when_read": None, "metadata_error": None}
+
+    def fake_read_metadata(path, info=None, timeout=120):
+        # Without unsquashfs the real one runs the AppImage itself (see the test below).
+        state["executable_when_read"] = os.access(path, os.X_OK)
+        if state["metadata_error"]:
+            raise state["metadata_error"]
+        return meta
+
+    monkeypatch.setattr(curseforge, "read_metadata", fake_read_metadata)
 
     def fake_remote(self):
         body = state["body"]
@@ -740,6 +749,7 @@ def test_curseforge_install_update_remove(cf_env, tmp_path: Path, monkeypatch):
     res = cf.install()
     assert res.changed and res.version == "1.325.0-41594" and cf.version() == "1.325.0-41594"
     assert cf.appimage.read_bytes() == state["body"] and os.access(cf.appimage, os.X_OK)
+    assert state["executable_when_read"]
     entry = (paths.APPLICATIONS_DIR / curseforge.DESKTOP_ID).read_text()
     assert f'Exec="{cf.appimage}" --no-sandbox %U\n' in entry
     assert "MimeType=x-scheme-handler/curseforge;x-scheme-handler/cfauth;\n" in entry
@@ -763,6 +773,14 @@ def test_curseforge_install_update_remove(cf_env, tmp_path: Path, monkeypatch):
         cf.install()
     assert state["downloads"] == 2 and cf.appimage.read_bytes() == good
     state["corrupt"] = False
+
+    # A download that can't be read fails without replacing the installed build or leaving
+    # the new file behind.
+    state["metadata_error"] = PermissionError(13, "Permission denied")
+    with pytest.raises(PermissionError):
+        cf.install()
+    assert cf.appimage.read_bytes() == good and not list(cf.root.glob("*.new*"))
+    state["metadata_error"] = None
 
     # Without FUSE the entry makes the AppImage extract itself instead of mounting (keeping the
     # folder, which a second start shares), and with only OpenSSL 4 it points the addon agent at it.
@@ -868,6 +886,55 @@ def test_curseforge_keeps_foreign_menu_entry(cf_env):
     assert state["downloads"] == 0 and "/opt/CurseForge" in foreign.read_text()
     cf.remove()
     assert foreign.exists()
+
+
+def test_curseforge_read_metadata_without_unsquashfs(tmp_path: Path, monkeypatch):
+    """Debian, Fedora and Arch have no unsquashfs by default; then the AppImage unpacks its own
+    desktop entry and icon, which only works once the file is executable."""
+    from glacier import curseforge
+    calls = []
+
+    def fake_runtime(cmd, cwd=None, **kw):
+        if not os.access(cmd[0], os.X_OK):
+            raise PermissionError(13, "Permission denied", cmd[0])
+        calls.append(cmd[1:])
+        root = Path(cwd) / "squashfs-root"
+        icons = root / "usr" / "share" / "icons" / "hicolor" / "256x256" / "apps"
+        icons.mkdir(parents=True, exist_ok=True)
+        if cmd[2] == "*.desktop":
+            (root / "curseforge.desktop").write_text("[Desktop Entry]\nName=CurseForge\nIcon=curseforge\n"
+                                                     "X-AppImage-Version=1.325.0-41594.41594\n")
+        if cmd[2] == "usr/share/icons/*":
+            (icons / "curseforge.png").write_bytes(_png(256, (255, 0, 0, 255)))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(curseforge.shutil, "which", lambda name: None)
+    monkeypatch.setattr(curseforge.subprocess, "run", fake_runtime)
+    app = tmp_path / "CurseForge.AppImage.new"
+    app.write_bytes(_fake_appimage())
+    app.chmod(0o644)
+    with pytest.raises(PermissionError):
+        curseforge.read_metadata(app)
+    app.chmod(0o755)
+    meta = curseforge.read_metadata(app)
+    assert meta.version == "1.325.0-41594" and meta.icon and calls[0] == ["--appimage-extract", "*.desktop"]
+
+
+def test_curseforge_start_failure(tmp_path: Path):
+    from glacier import curseforge
+    log = tmp_path / "curseforge.log"
+    # What the AppImage runtime wrote on Debian without libnss3: the loader's error lands in the
+    # middle of the runtime's list of extracted files.
+    x = "/tmp/appimage_extracted_c81aafb6ccf5186785c5ebe21fade6be"
+    log.write_text(f"--- Glacier started CurseForge ---\n{x}/usr/share/icons/hicolor/256x256\n/tmp/appimage_e"
+                   f"{x}/curseforge: error while loading shared libraries: libnspr4.so: cannot open shared "
+                   f"object file: No such file or directory\nxtracted_c81aafb6/usr/share/icons/hicolor/32x32\n")
+    msg = curseforge.start_failure(127, log)
+    assert "libnspr4.so is missing" in msg and "127" in msg
+    log.write_text("--- Glacier started CurseForge ---\nSegmentation fault\n")
+    assert curseforge.start_failure(139, log, "See it on the Logs page.") == \
+        "CurseForge didn't start (exit code 139). See it on the Logs page."
+    assert curseforge.start_failure(1, tmp_path / "missing.log").endswith("missing.log.")
 
 
 @pytest.mark.skipif(not shutil.which("mksquashfs") or not shutil.which("unsquashfs"),
@@ -1186,3 +1253,22 @@ def test_selfupdate_refuses_source_checkout(tmp_path: Path, monkeypatch):
     assert not ok and "git pull" in why
     with pytest.raises(selfupdate.UpdateError):
         selfupdate.install(selfupdate.release_from_json(_gh_release("9.0.0")))
+
+
+def test_describe_error():
+    import requests
+    from glacier.download import describe_error
+    req = requests.Request("GET", "https://curseforge.overwolf.com/downloads/curseforge-latest-linux.AppImage").prepare()
+    lookup = ("HTTPSConnectionPool(host='curseforge.overwolf.com', port=443): Max retries exceeded with url: "
+              "/downloads/curseforge-latest-linux.AppImage (Caused by NameResolutionError(\"<urllib3.connection."
+              "HTTPSConnection object at 0x7f>: Failed to resolve 'curseforge.overwolf.com' ([Errno -2] Name or "
+              "service not known)\"))")
+    assert describe_error(requests.ConnectionError(lookup, request=req)) == \
+        "Couldn't look up curseforge.overwolf.com. Check your internet connection and try again."
+    assert describe_error(requests.ConnectionError("Connection refused", request=req)).startswith(
+        "Couldn't connect to curseforge.overwolf.com.")
+    for timeout in (requests.ConnectTimeout("x", request=req), requests.ReadTimeout("x", request=req)):
+        assert describe_error(timeout).startswith("curseforge.overwolf.com didn't answer in time.")
+    assert describe_error(requests.ConnectionError("x")).startswith("Couldn't connect to the server.")
+    assert describe_error(PermissionError(13, "Permission denied")) == "[Errno 13] Permission denied"
+    assert describe_error(RuntimeError()) == "RuntimeError"
