@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shutil
 import tarfile
@@ -260,6 +262,66 @@ def find_runtime(appid: str | None) -> Runtime | None:
     return None
 
 
+# --------------------------------------------------------------------------- host graphics
+
+VULKAN_ICD_DIRS = ("/etc/vulkan/icd.d", "/usr/local/share/vulkan/icd.d", "/usr/share/vulkan/icd.d")
+# Where 32-bit libraries live: Debian/Ubuntu multiarch, Arch's lib32, Fedora/openSUSE's /usr/lib.
+LIB32_DIRS = ("/usr/lib/i386-linux-gnu", "/usr/lib32", "/usr/lib", "/lib/i386-linux-gnu", "/lib32")
+VULKAN32_HINT = ("Battle.net is a 32-bit program, and Proton runs it with your graphics driver's 32-bit "
+                 "Vulkan library. Without one, Battle.net closes right after it starts. On Debian or "
+                 "Ubuntu: sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install "
+                 "mesa-vulkan-drivers:i386 (NVIDIA: your driver's 32-bit libraries). Installing Steam "
+                 "adds them too.")
+
+
+def _elf_class(path: Path) -> int:
+    """1 for a 32-bit ELF file, 2 for 64-bit, 0 for anything else (or missing)."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(5)
+    except OSError:
+        return 0
+    return head[4] if len(head) == 5 and head[:4] == b"\x7fELF" else 0
+
+
+def vulkan32_available(icd_dirs: tuple[str, ...] = VULKAN_ICD_DIRS,
+                       lib32_dirs: tuple[str, ...] = LIB32_DIRS) -> bool | None:
+    """Whether the host has a 32-bit Vulkan driver, which Battle.net needs.
+
+    Battle.net.exe is 32-bit and its browser renders through Vulkan (DXVK or ANGLE). Proton's
+    32-bit side loads the host's 32-bit driver, which pressure-vessel imports into the runtime
+    container. Without one the client's GPU process fails and Battle.net aborts at start.
+    Steam pulls these libraries in, so only systems without Steam miss them.
+
+    Each Vulkan driver manifest names its library either by path or by bare name (Debian 13's
+    Mesa uses one manifest for both architectures). Returns None when no manifest is found or
+    the user points the loader elsewhere, so callers only warn when sure.
+    """
+    if os.environ.get("VK_DRIVER_FILES") or os.environ.get("VK_ICD_FILENAMES"):
+        return None
+    found = False
+    for d in icd_dirs:
+        try:
+            manifests = sorted(Path(d).glob("*.json"))
+        except OSError:
+            continue
+        for manifest in manifests:
+            try:
+                lib = json.loads(manifest.read_text()).get("ICD", {}).get("library_path")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if not isinstance(lib, str) or not lib:
+                continue
+            found = True
+            if "/" in lib:
+                candidates = [manifest.parent / lib]      # absolute, or relative to the manifest
+            else:
+                candidates = [Path(ld) / lib for ld in lib32_dirs]
+            if any(_elf_class(c) == 1 for c in candidates):
+                return True
+    return False if found else None
+
+
 # --------------------------------------------------------------------------- GE-Proton
 
 @dataclass
@@ -296,8 +358,30 @@ def list_ge_releases(limit: int = 10) -> list[Release]:
     return releases
 
 
+_ARCH_SUFFIX = re.compile(r"-(x86_64|amd64|aarch64|arm64)$")
+
+
+def ge_tag(dirname: str) -> str:
+    """Release tag of an installed GE-Proton directory.
+
+    Since GE-Proton 11 a release ships one tarball per architecture, so tag GE-Proton11-12
+    unpacks to GE-Proton11-12-x86_64.
+    """
+    return _ARCH_SUFFIX.sub("", dirname)
+
+
 def installed_ge_tags() -> set[str]:
-    return {r.path.name for r in find_runners() if r.is_ge}
+    return {ge_tag(r.path.name) for r in find_runners() if r.is_ge}
+
+
+def match_runner(runners: list[Runner], name: str) -> Runner | None:
+    """The runner a user means by id, display name, directory or GE-Proton release tag.
+
+    Glacier's own copy wins when Steam has a build of the same name, so it can be removed.
+    """
+    matches = [r for r in runners
+               if name in (r.id, r.name, r.path.name) or (r.is_ge and name == ge_tag(r.path.name))]
+    return next((r for r in matches if r.removable), matches[0] if matches else None)
 
 
 def _extract(archive: Path, dest_parent: Path, progress: ProgressFn | None,

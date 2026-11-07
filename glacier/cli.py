@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from .library import NotRegisteredError
 
 
 def _progress():
-    state = {"msg": None, "t": 0.0}
+    state = {"key": None, "t": 0.0}
     tty = sys.stderr.isatty()
 
     def report(msg: str, frac: float) -> None:
@@ -32,13 +33,22 @@ def _progress():
             sys.stderr.flush()
             if frac >= 1.0:
                 sys.stderr.write("\n")
-        elif msg != state["msg"] or now - state["t"] > 10:
+            return
+        # Without a terminal (a log file, a service), print each step once and its progress at
+        # most every 10 s. Download messages carry a running MiB count, so they differ by digits.
+        key = re.sub(r"\d+", "#", msg)
+        if key != state["key"] or frac >= 1.0 or now - state["t"] > 10:
             pct = f" ({frac * 100:.0f}%)" if frac >= 0 else ""
             print(f"{msg}{pct}", file=sys.stderr, flush=True)
             state["t"] = now
-        state["msg"] = msg
+        state["key"] = key
 
     return report
+
+
+def _warn_vulkan32() -> None:
+    if proton.vulkan32_available() is False:
+        print(f"Warning: no 32-bit Vulkan driver found. {proton.VULKAN32_HINT}", file=sys.stderr)
 
 
 def _done_line():
@@ -54,6 +64,7 @@ def cmd_setup(core: Core, a) -> int:
     core.setup(_progress())
     _done_line()
     print(f"Battle.net installed in {core.engine.pfx}. Log in in the Battle.net window to finish.")
+    _warn_vulkan32()
     _after_launch(a)
     return 0
 
@@ -67,9 +78,11 @@ def cmd_status(core: Core, a) -> int:
     rt = core.engine.runtime(r) if r else None
     st = core.bnet.status(check_latest=a.check_updates)
     play = stats.load()
+    vk32 = proton.vulkan32_available()
     if a.json:
         out = {
             "runner": r.name if r else None, "runtime": rt.name if rt else None,
+            "vulkan32": vk32,
             "prefix": str(core.engine.pfx), "battlenet": st.__dict__,
             "games": {u: {"name": s.game.name, "installed": s.installed, "version": s.version,
                           "latest": s.latest, "running": s.running, "progress": s.progress,
@@ -86,12 +99,15 @@ def cmd_status(core: Core, a) -> int:
                                          if newer else ""))
     print(f"  Proton   : {r.label if r else 'none found'}")
     print(f"  Runtime  : {rt.name if rt else ('disabled' if not core.cfg['use_runtime'] else 'n/a')}")
+    print(f"  Vulkan   : 32-bit driver {({True: 'found', False: 'MISSING', None: 'unknown'})[vk32]}")
     print(f"  Prefix   : {core.engine.pfx} ({'ok' if core.engine.prefix_exists() else 'not created'})")
     bn = "not installed"
     if st.installed:
         bn = f"{st.version or '?'}" + (f" (latest {st.latest})" if st.latest and st.latest != st.version else "")
         bn += ", running" if st.running else ""
     print(f"  Battle.net: {bn}")
+    if vk32 is False:
+        print(f"  {proton.VULKAN32_HINT}")
     rows = [s for s in lib.states.values() if s.installed or a.all]
     if not rows:
         print("  No games installed yet.")
@@ -139,11 +155,13 @@ def cmd_launch(core: Core, a) -> int:
 def cmd_bnet(core: Core, a) -> int:
     if not core.bnet.installed():
         core.setup(_progress())
+        _warn_vulkan32()
         _after_launch(a)
         return 0
     args = ["--runonstartup"] if a.background else []
     proc, log = core.bnet.launch(args)
     print(f"Starting Battle.net (log: {log})")
+    _warn_vulkan32()
     _after_launch(a)
     return 0
 
@@ -254,7 +272,7 @@ def cmd_proton(core: Core, a) -> int:
         print(f"Installed {r.name}" if r else "GE-Proton is up to date.")
         return 0
     if a.action == "use":
-        match = next((r for r in eng.runners(refresh=True) if a.target in (r.id, r.name, r.path.name)), None)
+        match = proton.match_runner(eng.runners(refresh=True), a.target or "")
         if not match:
             print(f"No Proton build matches {a.target}", file=sys.stderr)
             return 1
@@ -263,7 +281,7 @@ def cmd_proton(core: Core, a) -> int:
         print(f"Using {match.name}")
         return 0
     if a.action == "remove":
-        match = next((r for r in eng.runners(refresh=True) if a.target in (r.id, r.name, r.path.name)), None)
+        match = proton.match_runner(eng.runners(refresh=True), a.target or "")
         if not match:
             print(f"No Proton build matches {a.target}", file=sys.stderr)
             return 1

@@ -23,6 +23,19 @@ every game its own app-menu entry, icon and taskbar identity.
 
 Needs Python 3.11+, PyQt6, requests and Pillow (`sudo apt install python3-pyqt6 python3-requests python3-pil`).
 
+Battle.net also needs your graphics driver's **32-bit Vulkan driver**. It is a 32-bit program, and
+without one it closes right after it starts. Steam installs this driver, so you only need to add it
+yourself on a system without Steam:
+
+| System | 32-bit Vulkan driver |
+|---|---|
+| Debian, Ubuntu (AMD, Intel) | `sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install mesa-vulkan-drivers:i386` |
+| Debian, Ubuntu (NVIDIA) | the driver's 32-bit libraries: `nvidia-driver-libs:i386` (Debian), `libnvidia-gl-<version>:i386` (Ubuntu) |
+| Arch | `lib32-vulkan-radeon`, `lib32-vulkan-intel` or `lib32-nvidia-utils` (from `[multilib]`) |
+| Fedora | `mesa-vulkan-drivers.i686` |
+
+`glacier status` says whether it found one, and the GUI shows a banner when it is missing.
+
 ```bash
 ./install.sh           # copies Glacier to ~/.local/lib/glacier, adds ~/.local/bin/glacier + menu entry
 ./install.sh --dev     # same, but links to this checkout

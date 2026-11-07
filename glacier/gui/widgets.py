@@ -75,12 +75,19 @@ def repolish(w: QWidget) -> None:
     w.update()
 
 
+# Text for icon-only buttons when no icon theme provides the icon (desktops without one).
+_GLYPHS = {"view-refresh": "↻"}
+
+
 def button(text: str, kind: str = "", icon_name: str = "", tip: str = "") -> QPushButton:
     b = QPushButton(text)
     if kind:
         b.setProperty("kind", kind)
     if icon_name:
-        b.setIcon(icon(icon_name))
+        ic = icon(icon_name)
+        b.setIcon(ic)
+        if ic.isNull() and not text:
+            b.setText(_GLYPHS.get(icon_name, "…"))
     if tip:
         b.setToolTip(tip)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -324,6 +331,7 @@ class Banner(QFrame):
         self.text = QLabel()
         self.text.setWordWrap(True)
         self.text.setProperty("muted", True)
+        self.text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)   # commands to copy
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
         col.addWidget(self.title)
