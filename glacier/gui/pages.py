@@ -606,14 +606,17 @@ class AddonsPage(QWidget):
         outer.addWidget(scroll(body))
 
     def refresh(self):
-        from ..curseforge import ICON, running
-        from .widgets import icon, pixmap_from_file
+        from ..curseforge import ICON, PLACEHOLDER_COLOR, running
+        from .widgets import icon, pixmap_from_file, placeholder_pixmap
         cf = self.win.curseforge
         installed = cf.installed()
         busy = self.win.tasks.running("curseforge")
         self._running = installed and running()
         pm = pixmap_from_file(desktop.icon_png(ICON), 72) if installed else None
-        self.logo.setPixmap(pm or icon("preferences-plugin", "applications-other").pixmap(72, 72))
+        if not pm:
+            themed = icon("preferences-plugin", "applications-other")
+            pm = themed.pixmap(72, 72) if not themed.isNull() else placeholder_pixmap("CF", PLACEHOLDER_COLOR, 72)
+        self.logo.setPixmap(pm)
         if installed:
             self.details.setText(f"Version {cf.version() or '?'}\n{cf.appimage}\n"
                                  "It updates itself; Update re-downloads it when curseforge.com has a newer build.")

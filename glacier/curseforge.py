@@ -372,6 +372,26 @@ def wow_flavours(bnet: BattleNet, engine: Engine) -> list[Flavour]:
     return scan_wow_flavours(installs)
 
 
+_MISSING_LIB = re.compile(rb"error while loading shared libraries: ([^\s:]+)")
+
+
+def start_failure(code: int, log: Path, see: str = "") -> str:
+    """Text for a CurseForge that exited with code right after starting. Names the missing library
+    when the log says so (libnss3 or libasound2 on a system without a full desktop); otherwise
+    points at the log (see: where to find it)."""
+    try:
+        with open(log, "rb") as fh:
+            fh.seek(max(0, os.fstat(fh.fileno()).st_size - 65536))
+            found = _MISSING_LIB.findall(fh.read())
+    except OSError:
+        found = []
+    if found:
+        lib = found[-1].decode(errors="replace")
+        return (f"CurseForge didn't start: the library {lib} is missing (exit code {code}). "
+                "Install the package that has it.")
+    return f"CurseForge didn't start (exit code {code}). {see or f'See {log}.'}"
+
+
 def running() -> bool:
     """CurseForge (from any install) or its addon agent is running."""
     try:
@@ -746,16 +766,21 @@ class CurseForge:
         self.root.mkdir(parents=True, exist_ok=True)
         new = self._download(rem, progress, cancel)
         try:
-            info = inspect_appimage(new)
-        except ValueError as e:
-            new.unlink(missing_ok=True)
-            raise EngineError(f"The CurseForge download is not an AppImage ({e})") from None
-        if progress:
-            progress("Installing CurseForge", -1)
-        meta = read_metadata(new, info)
-        os.chmod(new, 0o755)
-        # Replacing is safe while CurseForge runs: the mounted old file stays until it exits.
-        os.replace(new, self.appimage)
+            try:
+                info = inspect_appimage(new)
+            except ValueError as e:
+                raise EngineError(f"The CurseForge download is not an AppImage ({e})") from None
+            if progress:
+                progress("Installing CurseForge", -1)
+            # Executable first: without unsquashfs (Debian, Fedora, Arch by default) read_metadata
+            # has the AppImage unpack its own desktop entry and icon.
+            os.chmod(new, 0o755)
+            meta = read_metadata(new, info)
+            # Replacing is safe while CurseForge runs: the mounted old file stays until it exits.
+            os.replace(new, self.appimage)
+        except BaseException:
+            new.unlink(missing_ok=True)     # don't leave a 150 MB download behind
+            raise
         st = self.appimage.stat()
         self._save_state(version=meta.version, md5=rem.md5 or download.file_hash(self.appimage, "md5"),
                          size=st.st_size, mtime_ns=st.st_mtime_ns, modified=rem.modified,

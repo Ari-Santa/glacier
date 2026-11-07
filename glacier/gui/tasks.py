@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 
-from ..download import Cancelled
+from ..download import Cancelled, describe_error
 
 
 class _Signals(QObject):
@@ -40,7 +40,7 @@ class Task(QRunnable):
         except Cancelled:
             self.signals.failed.emit("Cancelled", "")
         except Exception as e:  # noqa: BLE001 - surface every failure to the UI
-            self.signals.failed.emit(str(e) or e.__class__.__name__, traceback.format_exc())
+            self.signals.failed.emit(describe_error(e), traceback.format_exc())
         else:
             self.signals.done.emit(result)
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import APP_NAME, __version__, desktop, paths, proton, stats
 from .core import Core
-from .download import Cancelled
+from .download import Cancelled, describe_error
 from .engine import EngineError
 from .library import NotRegisteredError
 
@@ -319,8 +319,15 @@ def cmd_curseforge(core: Core, a) -> int:
         return 0
     if a.action == "launch":
         _print_sync(curseforge.sync_games(core.bnet, core.engine))
-        _, log = cf.launch()
-        print(f"Starting CurseForge (log: {log})")
+        proc, log = cf.launch()
+        print(f"Starting CurseForge (log: {log})", flush=True)
+        try:
+            code = proc.wait(timeout=5)     # one that can't start (a missing library) exits at once
+        except subprocess.TimeoutExpired:
+            return 0
+        if code:
+            print(f"error: {curseforge.start_failure(code, log)}", file=sys.stderr)
+            return 1
         return 0
     if a.action == "remove":
         if not cf.installed():
@@ -524,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
         return a.func(core, a)
     except (EngineError, RuntimeError, OSError) as e:
         _done_line()
-        print(f"error: {e}", file=sys.stderr)
+        print(f"error: {describe_error(e)}", file=sys.stderr)
         return 1
     except Cancelled:
         return 130
