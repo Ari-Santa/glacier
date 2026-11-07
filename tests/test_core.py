@@ -771,6 +771,35 @@ def test_curseforge_openssl_override(tmp_path: Path, monkeypatch):
     assert curseforge.openssl_override() == ""          # the user's own setting wins
 
 
+def test_curseforge_launch_without_privileges(cf_env, tmp_path: Path, monkeypatch):
+    from glacier import curseforge, paths
+    cf, state = cf_env
+    cf.install()
+    monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    started = []
+    monkeypatch.setattr(curseforge.subprocess, "Popen", lambda cmd, **kw: started.append(kw["env"]))
+
+    # Under no_new_privs the setuid fusermount can't mount it, so it extracts itself instead.
+    monkeypatch.setattr(curseforge, "no_new_privs", lambda: True)
+    log = cf.launch()
+    assert started[-1].get("APPIMAGE_EXTRACT_AND_RUN") == "1"
+    # ... but the menu entry, which the desktop starts without that flag, still mounts it.
+    cf.integrate()
+    assert f'Exec="{cf.appimage}" --no-sandbox %U\n' in (paths.APPLICATIONS_DIR / curseforge.DESKTOP_ID).read_text()
+
+    monkeypatch.setattr(curseforge, "no_new_privs", lambda: False)
+    assert cf.launch() == log and "APPIMAGE_EXTRACT_AND_RUN" not in started[-1]
+    # The log is appended to, never truncated under a CurseForge that is still writing to it.
+    assert log.read_text().count("Glacier started CurseForge") == 2
+
+
+def test_curseforge_no_new_privs_reads_proc():
+    from glacier import curseforge
+    with open("/proc/self/status") as fh:
+        flag = next(line.split()[1] for line in fh if line.startswith("NoNewPrivs:"))
+    assert curseforge.no_new_privs() is (flag == "1")
+
+
 def test_curseforge_keeps_foreign_menu_entry(cf_env):
     from glacier import curseforge, paths
     from glacier.engine import EngineError
@@ -901,6 +930,62 @@ def test_curseforge_sync_instances(tmp_path: Path):
     # A file Glacier doesn't understand is left alone.
     inst.write_text('{"not": "a list"}')
     assert sync_instances(flavours, cfg).skipped and inst.read_text() == '{"not": "a list"}'
+
+
+def test_curseforge_file_version():
+    from glacier.curseforge import file_version
+    assert file_version({"fileName": "Narcissus-1.8.7-b.zip"}) == "1.8.7-b"
+    assert file_version({"fileName": "BtWLoadouts-v1.20.25.zip"}) == "v1.20.25"
+    assert file_version({"fileName": "BetterTransmog.2.0.6.zip"}) == "2.0.6"
+    assert file_version({"fileName": "Gears-2026.11.3.zip", "releaseType": 2}) == "2026.11.3 (beta)"
+    assert file_version({"fileName": "Foo-1.0-beta.zip", "releaseType": 2}) == "1.0-beta"
+    # No version in the name: the file's date says which build it is.
+    assert file_version({"fileName": "CursorGlow.zip", "fileDate": "2026-11-06T10:00:00Z"}) == "2026-11-06"
+    assert file_version({"fileName": "CursorGlow.zip"}) == "CursorGlow"
+
+
+def test_curseforge_installed_addons(tmp_path: Path):
+    import json
+
+    from glacier import curseforge
+
+    def addon(aid, name, inst, latest=None, **extra):
+        return {"addonID": aid, "name": name, "primaryAuthor": "someone",
+                "webSiteURL": f"https://www.curseforge.com/wow/addons/{aid}",
+                "installedFile": {"id": inst[0], "fileName": inst[1], "fileDate": inst[2]},
+                "latestFile": latest and {"id": latest[0], "fileName": latest[1], "fileDate": latest[2]}, **extra}
+
+    retail = "/games/World of Warcraft/_retail_/"
+    entries = [
+        {"gameTypeID": 1, "installPath": retail, "installedAddons": [
+            addon(2, "zeta", (20, "Zeta-1.0.zip", "2026-01-01"), (21, "Zeta-1.1.zip", "2026-02-01")),
+            addon(1, "Alpha", (10, "Alpha-2.0.zip", "2026-01-01"), (10, "Alpha-2.0.zip", "2026-01-01")),
+            # Ignored in CurseForge, or "latest" older than the installed beta: no update.
+            addon(3, "Ignored", (30, "I-1.zip", "2026-01-01"), (31, "I-2.zip", "2026-03-01"),
+                  preferenceIsIgnored=True),
+            addon(4, "Beta", (40, "B-2.0b.zip", "2026-03-01"), (39, "B-1.9.zip", "2026-02-01")),
+            {"name": "broken"}, "not a dict",
+        ]},
+        {"gameTypeID": 1, "installPath": "/games/World of Warcraft/_classic_/", "installedAddons": []},
+        {"gameTypeID": 432, "installPath": "/minecraft/", "installedAddons": [addon(9, "Mod", (90, "m.zip", ""))]},
+    ]
+    f = curseforge.instances_file(tmp_path)
+    f.parent.mkdir(parents=True)
+    f.write_text(json.dumps(entries))
+
+    got = curseforge.installed_addons(tmp_path)
+    assert set(got) == {Path(retail), Path("/games/World of Warcraft/_classic_")}
+    addons = got[Path(retail)]
+    assert [a.name for a in addons] == ["Alpha", "Beta", "Ignored", "zeta"]
+    assert [a.name for a in addons if a.update] == ["zeta"]
+    zeta = addons[-1]
+    assert (zeta.version, zeta.latest, zeta.author) == ("1.0", "1.1", "someone")
+    assert zeta.url == "https://www.curseforge.com/wow/addons/2"
+
+    # No list yet, or one CurseForge is halfway through writing: nothing, not an error.
+    assert curseforge.installed_addons(tmp_path / "none") == {}
+    f.write_text(json.dumps(entries)[:40])
+    assert curseforge.installed_addons(tmp_path) == {}
 
 
 def test_curseforge_sync_first_start(tmp_path: Path):

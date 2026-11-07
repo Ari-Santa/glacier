@@ -20,6 +20,7 @@ from . import theme
 from .widgets import Banner, FlowLayout, GameCard, button, game_pixmap, label, repolish
 
 if TYPE_CHECKING:
+    from ..curseforge import Addon, Flavour
     from .app import MainWindow
 
 
@@ -594,10 +595,10 @@ class AddonsPage(QWidget):
         v = QVBoxLayout(box)
         self.wow_note = label("", muted=True, wrap=True)
         v.addWidget(self.wow_note)
-        self.wow_grid = QGridLayout()
-        self.wow_grid.setColumnStretch(1, 1)
-        self.wow_grid.setHorizontalSpacing(14)
-        v.addLayout(self.wow_grid)
+        self.wow_rows = QVBoxLayout()
+        self.wow_rows.setSpacing(18)
+        v.addLayout(self.wow_rows)
+        self._addons_mtime = 0.0
         lay.addWidget(box)
         lay.addStretch(1)
         outer = QVBoxLayout(self)
@@ -636,6 +637,16 @@ class AddonsPage(QWidget):
         if now != self._running:
             self._running = now
             self._show_state(cf.installed(), self.win.tasks.running("curseforge"))
+        if self._instances_mtime() != self._addons_mtime:    # CurseForge saved its addon list
+            self._refresh_wow(cf.installed())
+
+    @staticmethod
+    def _instances_mtime() -> float:
+        from ..curseforge import instances_file
+        try:
+            return instances_file().stat().st_mtime
+        except OSError:
+            return 0.0
 
     def _show_state(self, installed: bool, busy: bool):
         text = ("Working…" if busy else "Running" if self._running else "Installed" if installed
@@ -645,11 +656,12 @@ class AddonsPage(QWidget):
         self.state.setStyleSheet(f"color: {color}; background: transparent;")
 
     def _refresh_wow(self, cf_installed: bool):
-        from ..curseforge import FLAVOUR_NAMES, wow_flavours
-        while self.wow_grid.count():
-            w = self.wow_grid.takeAt(0).widget()
+        from ..curseforge import FLAVOUR_NAMES, installed_addons, wow_flavours
+        while self.wow_rows.count():
+            w = self.wow_rows.takeAt(0).widget()
             if w:
                 w.deleteLater()
+        self._addons_mtime = self._instances_mtime()
         try:
             flavours = [f for f in wow_flavours(self.win.core.bnet, self.win.core.engine) if f.installed]
         except (OSError, ValueError):
@@ -658,20 +670,87 @@ class AddonsPage(QWidget):
             self.wow_note.setText("World of Warcraft isn't installed yet. Install it in Battle.net; it shows up "
                                   "here and in CurseForge by itself.")
             return
-        self.wow_note.setText("Glacier keeps CurseForge's list of these flavours in step with Battle.net "
-                              "whenever CurseForge is closed." if cf_installed else
-                              "Once CurseForge is installed, Glacier tells it where each of these flavours is.")
-        for row, fl in enumerate(flavours):
-            name = label(FLAVOUR_NAMES.get(fl.code, fl.code), "SectionTitle")
-            where = label(f"{fl.path}" + (f"  ·  {fl.version}" if fl.version else ""), muted=True)
-            where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            addons = fl.path / "Interface" / "AddOns"
-            b = button("AddOns folder", icon_name="folder-open",
-                       tip=f"Open {addons if addons.is_dir() else fl.path}")
-            b.clicked.connect(lambda _=False, p=(addons if addons.is_dir() else fl.path): open_path(p))
-            self.wow_grid.addWidget(name, row, 0)
-            self.wow_grid.addWidget(where, row, 1)
-            self.wow_grid.addWidget(b, row, 2)
+        by_folder = installed_addons()
+        note = ("Glacier keeps CurseForge's list of these flavours in step with Battle.net "
+                "whenever CurseForge is closed." if cf_installed else
+                "Once CurseForge is installed, Glacier tells it where each of these flavours is.")
+        if by_folder and self._addons_mtime:
+            saved = time.localtime(self._addons_mtime)
+            when = time.strftime("%H:%M" if saved[:3] == time.localtime()[:3] else "%d %b %H:%M", saved)
+            note += (f" Addons and updates are as CurseForge last saw them ({when}); it looks for updates "
+                     "while it is open.")
+        self.wow_note.setText(note)
+        for fl in flavours:
+            addons = by_folder.get(fl.path) if by_folder else None
+            self.wow_rows.addWidget(self._flavour_widget(FLAVOUR_NAMES.get(fl.code, fl.code), fl,
+                                                         addons, cf_installed))
+
+    def _flavour_widget(self, title: str, fl: Flavour, addons: list[Addon] | None,
+                        cf_installed: bool) -> QWidget:
+        """One WoW flavour: where it is, and the addons CurseForge has installed there."""
+        import html
+        w = QWidget()
+        w.setObjectName("Row")      # takes the group box's colour, not the page's
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        head = QHBoxLayout()
+        col = QVBoxLayout()
+        col.setSpacing(0)
+        col.addWidget(label(title, "SectionTitle"))
+        where = label(f"{fl.path}" + (f"  ·  {fl.version}" if fl.version else ""), muted=True)
+        where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        col.addWidget(where)
+        head.addLayout(col, 1)
+        updates = [a for a in addons or [] if a.update]
+        if updates and cf_installed:
+            b_upd = button("Update in CurseForge", "primary", "view-refresh",
+                           "Open CurseForge to install the newer versions")
+            b_upd.clicked.connect(lambda: self.win.curseforge_action("open"))
+            head.addWidget(b_upd, 0, Qt.AlignmentFlag.AlignTop)
+        folder = fl.path / "Interface" / "AddOns"
+        target = folder if folder.is_dir() else fl.path
+        b = button("AddOns folder", icon_name="folder-open", tip=f"Open {target}")
+        b.clicked.connect(lambda _=False, p=target: open_path(p))
+        head.addWidget(b, 0, Qt.AlignmentFlag.AlignTop)
+        v.addLayout(head)
+
+        if addons is None:
+            if cf_installed:
+                v.addWidget(label("Not in CurseForge's list yet; Glacier adds it the next time it opens "
+                                  "CurseForge.", muted=True, wrap=True))
+            return w
+        if not addons:
+            v.addWidget(label("No addons from CurseForge here yet.", muted=True))
+            return w
+        summary = f"{len(addons)} addon{'s' if len(addons) != 1 else ''} from CurseForge"
+        if updates:
+            summary += f"  ·  {len(updates)} update{'s' if len(updates) != 1 else ''} available"
+        s = label(summary)
+        s.setStyleSheet(f"color: {theme.WARN if updates else theme.MUTED}; background: transparent;")
+        v.addWidget(s)
+        grid = QGridLayout()
+        grid.setContentsMargins(12, 2, 0, 0)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(4)
+        grid.setColumnStretch(0, 1)
+        for row, a in enumerate(sorted(addons, key=lambda x: (not x.update, x.name.casefold()))):
+            name = QLabel(f'<a href="{html.escape(a.url)}" style="color: {theme.TEXT}; text-decoration: none;">'
+                          f"{html.escape(a.name)}</a>" if a.url else html.escape(a.name))
+            name.setTextFormat(Qt.TextFormat.RichText)
+            name.setOpenExternalLinks(True)
+            if a.url:
+                name.setToolTip(f"Open {a.url}")
+            grid.addWidget(name, row, 0)
+            grid.addWidget(label(a.author, muted=True), row, 1)
+            grid.addWidget(label(a.version, muted=True), row, 2)
+            if a.update:
+                new = label(f"→ {a.latest}")
+                new.setStyleSheet(f"color: {theme.WARN}; background: transparent;")
+                new.setToolTip("CurseForge has a newer version")
+                grid.addWidget(new, row, 3)
+        v.addLayout(grid)
+        return w
 
 
 # =========================================================================== Proton

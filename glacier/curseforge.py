@@ -98,6 +98,23 @@ def can_mount(info: AppImageInfo) -> bool:
     return ctypes.util.find_library("fuse") is not None     # libfuse.so.2
 
 
+def no_new_privs() -> bool:
+    """Whether this process runs with no_new_privs (set by sandboxes such as bwrap).
+
+    The AppImage mounts itself through the setuid fusermount, which can't gain root then and
+    fails with "fusermount: mount failed: Operation not permitted". The flag is inherited by
+    everything Glacier starts, so it only matters for launches, not for the menu entry.
+    """
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("NoNewPrivs:"):
+                    return line.split()[1:2] == ["1"]
+    except OSError:
+        pass
+    return False
+
+
 LIB_DIRS = ("/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu", "/usr/lib64", "/lib64", "/usr/lib", "/lib")
 
 
@@ -497,6 +514,77 @@ def sync_games(bnet: BattleNet, engine: Engine) -> SyncResult:
     return sync_instances(wow_flavours(bnet, engine))
 
 
+# --------------------------------------------------------------------------- installed addons
+#
+# The same file lists each instance's addons: the file CurseForge installed and the newest one
+# it found for the instance's release-type preference. It only looks for updates while it runs,
+# and saves the list as it goes, so this is what CurseForge last saw. Read-only: CurseForge
+# rewrites the file while running, and its own API is private (a WebSocket keyed per start).
+
+RELEASE_TYPES = {2: "beta", 3: "alpha"}     # CurseForge file releaseType; 1 = release
+
+
+def instances_file(config_dir: Path | None = None) -> Path:
+    return (config_dir or CF_CONFIG_DIR) / "agent" / "GameInstances" / "AddonGameInstance.json"
+
+
+def file_version(f: dict) -> str:
+    """A short version for a CurseForge file: "1.8.7" from "Narcissus-1.8.7.zip", else its date."""
+    stem = re.sub(r"\.zip$", "", str(f.get("fileName") or ""), flags=re.IGNORECASE)
+    m = re.search(r"(?:^|[-_ .])(v?\d[\w.+-]*)$", stem)
+    out = m.group(1) if m else (str(f.get("fileDate") or "")[:10] or stem)
+    kind = RELEASE_TYPES.get(f.get("releaseType"))
+    return f"{out} ({kind})" if kind and kind not in out.lower() else out
+
+
+@dataclass(frozen=True)
+class Addon:
+    addon_id: int
+    name: str
+    author: str
+    url: str            # its CurseForge page ("" if unknown)
+    version: str        # the installed file
+    latest: str         # the newer file CurseForge found ("" when there is none)
+
+    @property
+    def update(self) -> bool:
+        return bool(self.latest)
+
+
+def _addon(a: dict) -> Addon | None:
+    inst = a.get("installedFile")
+    if not isinstance(inst, dict):
+        return None
+    new = a.get("latestFile")
+    newer = (isinstance(new, dict) and new.get("id") not in (None, inst.get("id"))
+             and str(new.get("fileDate") or "") >= str(inst.get("fileDate") or "")
+             and not a.get("preferenceIsIgnored"))
+    authors = a.get("authors") if isinstance(a.get("authors"), list) else []
+    author = a.get("primaryAuthor") or next((x.get("name") for x in authors if isinstance(x, dict)), "")
+    url = str(a.get("webSiteURL") or "")
+    return Addon(int(a.get("addonID") or 0), str(a.get("name") or a.get("fileNameOnDisk") or "?"),
+                 str(author or ""), url if url.startswith("https://") else "",
+                 file_version(inst), file_version(new) if newer else "")
+
+
+def installed_addons(config_dir: Path | None = None) -> dict[Path, list[Addon]]:
+    """CurseForge's WoW addons by flavour folder, sorted by name.
+    Empty when CurseForge has no list yet or it can't be read."""
+    try:
+        entries = json.loads(instances_file(config_dir).read_text())
+    except (OSError, ValueError):
+        return {}
+    out: dict[Path, list[Addon]] = {}
+    for e in entries if isinstance(entries, list) else []:
+        if not isinstance(e, dict) or e.get("gameTypeID") != WOW_GAME_ID or not isinstance(e.get("installPath"), str):
+            continue
+        addons = [x for x in (_addon(a) for a in e.get("installedAddons") or [] if isinstance(a, dict)) if x]
+        out.setdefault(Path(_norm(e["installPath"])), []).extend(addons)
+    for addons in out.values():
+        addons.sort(key=lambda x: x.name.casefold())
+    return out
+
+
 # --------------------------------------------------------------------------- install / update
 
 @dataclass
@@ -688,9 +776,15 @@ class CurseForge:
             raise EngineError(f"{self.appimage} is not an AppImage ({e})") from None
         env = dict(os.environ)
         env.update(launch_env(info))
+        if no_new_privs():
+            env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
         paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
         log = paths.LOG_DIR / "curseforge.log"
-        with open(log, "wb") as fh:
+        # Append: a CurseForge that is already running keeps writing to this file, and
+        # truncating it under that writer leaves a hole of NUL bytes before its next line.
+        with open(log, "ab") as fh:
+            fh.write(f"\n--- Glacier started CurseForge at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+            fh.flush()
             subprocess.Popen([str(self.appimage), *SANDBOX_ARGS], stdin=subprocess.DEVNULL, stdout=fh,
                              stderr=subprocess.STDOUT, env=env, start_new_session=True)
         return log

@@ -79,7 +79,7 @@ QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar:horizontal {{ height: 0; }}
 QGroupBox {{ border: 1px solid {BORDER}; border-radius: 10px; margin-top: 16px; padding: 14px 12px 12px 12px; background: {SURFACE}; }}
 QGroupBox::title {{ subcontrol-origin: margin; left: 14px; padding: 0 6px; color: {MUTED}; background: {BG}; }}
-QGroupBox QLabel, QGroupBox QCheckBox {{ background: transparent; }}
+QGroupBox QLabel, QGroupBox QCheckBox, QGroupBox #Row {{ background: transparent; }}
 QCheckBox {{ spacing: 8px; padding: 2px 0; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {BORDER}; background: {SURFACE2}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
