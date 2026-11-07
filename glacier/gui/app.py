@@ -21,7 +21,7 @@ from ..engine import EngineError
 from ..library import BNET_UID
 from ..watcher import PlaytimeTracker, WatcherLock, WindowTagger, spawn_detached
 from . import theme
-from .pages import BattleNetPage, LibraryPage, LogsPage, ProtonPage, SettingsPage
+from .pages import AddonsPage, BattleNetPage, LibraryPage, LogsPage, ProtonPage, SettingsPage
 from .tasks import TaskManager
 from .widgets import app_icon, button, icon, label, pixmap_from_file
 
@@ -63,10 +63,12 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.library_page = LibraryPage(self)
         self.bnet_page = BattleNetPage(self)
+        self.addons_page = AddonsPage(self)
         self.proton_page = ProtonPage(self)
         self.settings_page = SettingsPage(self)
         self.logs_page = LogsPage(self)
-        for p in (self.library_page, self.bnet_page, self.proton_page, self.settings_page, self.logs_page):
+        for p in (self.library_page, self.bnet_page, self.addons_page, self.proton_page, self.settings_page,
+                  self.logs_page):     # same order as the sidebar buttons
             self.stack.addWidget(p)
         body.addWidget(self.stack, 1)
         root.addLayout(body, 1)
@@ -106,8 +108,8 @@ class MainWindow(QMainWindow):
         self.nav = QButtonGroup(self)
         self.nav.setExclusive(True)
         for i, (text, ic) in enumerate((("Library", "applications-games"), ("Battle.net", "internet-services"),
-                                        ("Proton", "wine"), ("Settings", "configure"),
-                                        ("Logs", "text-x-log"))):
+                                        ("Addons", "preferences-plugin"), ("Proton", "wine"),
+                                        ("Settings", "configure"), ("Logs", "text-x-log"))):
             b = QPushButton(f"  {text}")
             b.setObjectName("NavButton")
             b.setCheckable(True)
@@ -163,6 +165,8 @@ class MainWindow(QMainWindow):
                 self.proton_page.load_releases()
         elif self.stack.currentWidget() is self.bnet_page:
             self.bnet_page.refresh(self.bnet_status)
+        elif self.stack.currentWidget() is self.addons_page:
+            self.addons_page.refresh()
 
     # ------------------------------------------------------------------ startup / polling
     def startup(self):
@@ -271,6 +275,8 @@ class MainWindow(QMainWindow):
         if bnet_running != self.bnet_status.running:
             self.bnet_status.running = bnet_running
             self._refresh_bnet_widgets()
+        if self.stack.currentWidget() is self.addons_page:
+            self.addons_page.tick()
         try:
             mtime = core.bnet.product_db.stat().st_mtime
         except OSError:
@@ -564,7 +570,7 @@ class MainWindow(QMainWindow):
     def curseforge_action(self, action: str):
         """install / update / open / remove the CurseForge AppImage."""
         cf = self.curseforge
-        page = self.bnet_page
+        page = self.addons_page
         if action == "open":
             try:
                 synced = sync_games(self.core.bnet, self.core.engine)
@@ -583,7 +589,8 @@ class MainWindow(QMainWindow):
                 return
             cf.remove()
             self.notify("Removed CurseForge.")
-            page.refresh_curseforge()
+            page.refresh()
+            self.update_tray()
             return
 
         def work(progress, cancel):
@@ -593,11 +600,12 @@ class MainWindow(QMainWindow):
         def done(out):
             result, synced = out
             self.notify(" ".join([result.message] + synced.lines()[:3]))
-            page.refresh_curseforge()
+            page.refresh()
+            self.update_tray()
 
         self.tasks.start("CurseForge", work, done, key="curseforge",
-                         on_error=lambda _msg: page.refresh_curseforge())
-        page.refresh_curseforge()
+                         on_error=lambda _msg: page.refresh())
+        page.refresh()
 
     def install_ge(self, release: proton.Release):
         def done(r):
@@ -692,6 +700,8 @@ class MainWindow(QMainWindow):
         if menu.actions():
             menu.addSeparator()
         menu.addAction("Open Battle.net", self.start_battlenet)
+        if self.curseforge.installed():
+            menu.addAction("Open CurseForge", lambda: self.curseforge_action("open"))
         menu.addAction(f"Show {APP_NAME}", self.bring_to_front)
         menu.addSeparator()
         menu.addAction("Stop Battle.net and games", self.stop_all)

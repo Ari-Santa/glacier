@@ -473,29 +473,6 @@ class BattleNetPage(QWidget):
         g.addWidget(self.autostart, 2, 0, 1, 2)
         lay.addWidget(box)
 
-        box = QGroupBox("Addons: CurseForge")
-        g = QVBoxLayout(box)
-        self.cf_info = label("", muted=True, wrap=True)
-        self.cf_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        g.addWidget(self.cf_info)
-        row = QHBoxLayout()
-        self.b_cf_install = button("Install CurseForge", "primary", "download",
-                                   "Download the official CurseForge app (AppImage) and add it to the app menu")
-        self.b_cf_install.clicked.connect(lambda: self.win.curseforge_action("install"))
-        self.b_cf_open = button("Open CurseForge", "primary", "media-playback-start")
-        self.b_cf_open.clicked.connect(lambda: self.win.curseforge_action("open"))
-        self.b_cf_update = button("Update", icon_name="view-refresh",
-                                  tip="Download the newest CurseForge if there is a newer one")
-        self.b_cf_update.clicked.connect(lambda: self.win.curseforge_action("update"))
-        self.b_cf_remove = button("Remove", icon_name="edit-delete",
-                                  tip="Remove the app; your addons and CurseForge settings are kept")
-        self.b_cf_remove.clicked.connect(lambda: self.win.curseforge_action("remove"))
-        for b in (self.b_cf_install, self.b_cf_open, self.b_cf_update, self.b_cf_remove):
-            row.addWidget(b)
-        row.addStretch(1)
-        g.addLayout(row)
-        lay.addWidget(box)
-
         box = QGroupBox("Prefix tools")
         g = QGridLayout(box)
         tools = [("Wine configuration", "winecfg", "preferences-system"),
@@ -562,31 +539,139 @@ class BattleNetPage(QWidget):
         self.b_stop.setEnabled(status.running or bool(core.engine.processes()))
         self.b_install.setVisible(not status.installed)
         self.b_reinstall.setVisible(status.installed)
-        self.refresh_curseforge()
 
-    def refresh_curseforge(self):
-        from ..curseforge import wow_folders
+
+# =========================================================================== Addons
+
+class AddonsPage(QWidget):
+    """CurseForge, the World of Warcraft addon manager, and the WoW flavours it looks after."""
+
+    def __init__(self, win: MainWindow):
+        super().__init__()
+        self.win = win
+        self._running = False
+        body = QWidget()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(28, 22, 28, 28)
+        lay.setSpacing(14)
+        lay.addWidget(page_header("Addons", "CurseForge keeps your World of Warcraft addons up to date. "
+                                            "It runs as a normal Linux app, outside Proton."))
+        card = QFrame()
+        card.setObjectName("Panel")
+        cl = QHBoxLayout(card)
+        cl.setContentsMargins(20, 18, 20, 18)
+        cl.setSpacing(18)
+        self.logo = QLabel()
+        self.logo.setFixedSize(72, 72)
+        cl.addWidget(self.logo, 0, Qt.AlignmentFlag.AlignTop)
+        col = QVBoxLayout()
+        self.state = label("", "SectionTitle")
+        self.details = label("", muted=True, wrap=True)
+        self.details.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        col.addWidget(self.state)
+        col.addWidget(self.details)
+        col.addStretch(1)
+        cl.addLayout(col, 1)
+        btns = QVBoxLayout()
+        self.b_install = button("Install CurseForge", "primary", "download",
+                                "Download the official CurseForge app (AppImage) and add it to the app menu")
+        self.b_install.clicked.connect(lambda: self.win.curseforge_action("install"))
+        self.b_open = button("Open CurseForge", "primary", "media-playback-start")
+        self.b_open.clicked.connect(lambda: self.win.curseforge_action("open"))
+        self.b_update = button("Update", icon_name="view-refresh",
+                               tip="Download the newest CurseForge if there is a newer one")
+        self.b_update.clicked.connect(lambda: self.win.curseforge_action("update"))
+        self.b_remove = button("Remove", icon_name="edit-delete",
+                               tip="Remove the app; your addons and CurseForge settings are kept")
+        self.b_remove.clicked.connect(lambda: self.win.curseforge_action("remove"))
+        for b in (self.b_install, self.b_open, self.b_update, self.b_remove):
+            btns.addWidget(b)
+        btns.addStretch(1)
+        cl.addLayout(btns)
+        lay.addWidget(card)
+
+        box = QGroupBox("World of Warcraft")
+        v = QVBoxLayout(box)
+        self.wow_note = label("", muted=True, wrap=True)
+        v.addWidget(self.wow_note)
+        self.wow_grid = QGridLayout()
+        self.wow_grid.setColumnStretch(1, 1)
+        self.wow_grid.setHorizontalSpacing(14)
+        v.addLayout(self.wow_grid)
+        lay.addWidget(box)
+        lay.addStretch(1)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll(body))
+
+    def refresh(self):
+        from ..curseforge import ICON, running
+        from .widgets import icon, pixmap_from_file
         cf = self.win.curseforge
         installed = cf.installed()
         busy = self.win.tasks.running("curseforge")
+        self._running = installed and running()
+        pm = pixmap_from_file(desktop.icon_png(ICON), 72) if installed else None
+        self.logo.setPixmap(pm or icon("preferences-plugin", "applications-other").pixmap(72, 72))
         if installed:
-            lines = [f"CurseForge {cf.version() or ''}".rstrip() + f" · {cf.appimage}"]
-            folders = wow_folders(self.win.core.library)
-            if folders:
-                lines.append("World of Warcraft: " + ", ".join(str(f) for f in folders)
-                             + "\nGlacier keeps CurseForge's list of WoW flavours in step with Battle.net "
-                               "whenever CurseForge is closed.")
-            self.cf_info.setText("\n".join(lines))
+            self.details.setText(f"Version {cf.version() or '?'}\n{cf.appimage}\n"
+                                 "It updates itself; Update re-downloads it when curseforge.com has a newer build.")
         else:
-            self.cf_info.setText("The official CurseForge app keeps your World of Warcraft addons up to date. "
-                                 "Glacier downloads its Linux AppImage from curseforge.com and adds it to "
-                                 "your app menu.")
-        self.b_cf_install.setVisible(not installed)
-        self.b_cf_open.setVisible(installed)
-        self.b_cf_update.setVisible(installed)
-        self.b_cf_remove.setVisible(installed)
-        for b in (self.b_cf_install, self.b_cf_update, self.b_cf_remove):
+            self.details.setText("Glacier downloads the official Linux AppImage from curseforge.com, checks it, "
+                                 "adds it to your app menu and tells it where World of Warcraft is.")
+        self._show_state(installed, busy)
+        self.b_install.setVisible(not installed)
+        self.b_open.setVisible(installed)
+        self.b_update.setVisible(installed)
+        self.b_remove.setVisible(installed)
+        for b in (self.b_install, self.b_update, self.b_remove):
             b.setEnabled(not busy)
+        self._refresh_wow(installed)
+
+    def tick(self):
+        """Called from the main poll while this page is visible: keep "Running" current."""
+        from ..curseforge import running
+        cf = self.win.curseforge
+        now = cf.installed() and running()
+        if now != self._running:
+            self._running = now
+            self._show_state(cf.installed(), self.win.tasks.running("curseforge"))
+
+    def _show_state(self, installed: bool, busy: bool):
+        text = ("Working…" if busy else "Running" if self._running else "Installed" if installed
+                else "Not installed")
+        self.state.setText(f"CurseForge — {text}")
+        color = theme.OK if self._running and not busy else theme.TEXT
+        self.state.setStyleSheet(f"color: {color}; background: transparent;")
+
+    def _refresh_wow(self, cf_installed: bool):
+        from ..curseforge import FLAVOUR_NAMES, wow_flavours
+        while self.wow_grid.count():
+            w = self.wow_grid.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        try:
+            flavours = [f for f in wow_flavours(self.win.core.bnet, self.win.core.engine) if f.installed]
+        except (OSError, ValueError):
+            flavours = []
+        if not flavours:
+            self.wow_note.setText("World of Warcraft isn't installed yet. Install it in Battle.net; it shows up "
+                                  "here and in CurseForge by itself.")
+            return
+        self.wow_note.setText("Glacier keeps CurseForge's list of these flavours in step with Battle.net "
+                              "whenever CurseForge is closed." if cf_installed else
+                              "Once CurseForge is installed, Glacier tells it where each of these flavours is.")
+        for row, fl in enumerate(flavours):
+            name = label(FLAVOUR_NAMES.get(fl.code, fl.code), "SectionTitle")
+            where = label(f"{fl.path}" + (f"  ·  {fl.version}" if fl.version else ""), muted=True)
+            where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            addons = fl.path / "Interface" / "AddOns"
+            b = button("AddOns folder", icon_name="folder-open",
+                       tip=f"Open {addons if addons.is_dir() else fl.path}")
+            b.clicked.connect(lambda _=False, p=(addons if addons.is_dir() else fl.path): open_path(p))
+            self.wow_grid.addWidget(name, row, 0)
+            self.wow_grid.addWidget(where, row, 1)
+            self.wow_grid.addWidget(b, row, 2)
 
 
 # =========================================================================== Proton
