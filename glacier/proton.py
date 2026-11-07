@@ -10,7 +10,7 @@ import tarfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from . import download, paths, vdf
 
@@ -270,8 +270,9 @@ LIB32_DIRS = ("/usr/lib/i386-linux-gnu", "/usr/lib32", "/usr/lib", "/lib/i386-li
 VULKAN32_HINT = ("Battle.net is a 32-bit program, and Proton runs it with your graphics driver's 32-bit "
                  "Vulkan library. Without one, Battle.net closes right after it starts. On Debian or "
                  "Ubuntu: sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install "
-                 "mesa-vulkan-drivers:i386 (NVIDIA: your driver's 32-bit libraries). Installing Steam "
-                 "adds them too.")
+                 "mesa-vulkan-drivers:i386 (NVIDIA: your driver's 32-bit libraries). Arch: "
+                 "lib32-vulkan-radeon, lib32-vulkan-intel or lib32-nvidia-utils. Fedora: "
+                 "mesa-vulkan-drivers.i686 (NVIDIA: xorg-x11-drv-nvidia-libs.i686). The README lists more.")
 
 
 def _elf_class(path: Path) -> int:
@@ -285,19 +286,23 @@ def _elf_class(path: Path) -> int:
 
 
 def vulkan32_available(icd_dirs: tuple[str, ...] = VULKAN_ICD_DIRS,
-                       lib32_dirs: tuple[str, ...] = LIB32_DIRS) -> bool | None:
+                       lib32_dirs: tuple[str, ...] = LIB32_DIRS, *,
+                       env: Mapping[str, str] | None = None) -> bool | None:
     """Whether the host has a 32-bit Vulkan driver, which Battle.net needs.
 
     Battle.net.exe is 32-bit and its browser renders through Vulkan (DXVK or ANGLE). Proton's
     32-bit side loads the host's 32-bit driver, which pressure-vessel imports into the runtime
     container. Without one the client's GPU process fails and Battle.net aborts at start.
-    Steam pulls these libraries in, so only systems without Steam miss them.
+    Steam from the distribution's packages pulls these libraries in; Flatpak and Snap Steam
+    bring their own inside the sandbox, which Battle.net doesn't use.
 
     Each Vulkan driver manifest names its library either by path or by bare name (Debian 13's
     Mesa uses one manifest for both architectures). Returns None when no manifest is found or
-    the user points the loader elsewhere, so callers only warn when sure.
+    the user points the loader elsewhere in `env` (Battle.net's environment, default ours), so
+    callers only warn when sure.
     """
-    if os.environ.get("VK_DRIVER_FILES") or os.environ.get("VK_ICD_FILENAMES"):
+    env = os.environ if env is None else env
+    if any(env.get(k) for k in ("VK_DRIVER_FILES", "VK_ICD_FILENAMES", "VK_ADD_DRIVER_FILES")):
         return None
     found = False
     for d in icd_dirs:

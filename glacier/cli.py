@@ -46,8 +46,8 @@ def _progress():
     return report
 
 
-def _warn_vulkan32() -> None:
-    if proton.vulkan32_available() is False:
+def _warn_vulkan32(core: Core) -> None:
+    if proton.vulkan32_available(env=core.engine.vulkan_env()) is False:
         print(f"Warning: no 32-bit Vulkan driver found. {proton.VULKAN32_HINT}", file=sys.stderr)
 
 
@@ -64,7 +64,7 @@ def cmd_setup(core: Core, a) -> int:
     core.setup(_progress())
     _done_line()
     print(f"Battle.net installed in {core.engine.pfx}. Log in in the Battle.net window to finish.")
-    _warn_vulkan32()
+    _warn_vulkan32(core)
     _after_launch(a)
     return 0
 
@@ -78,7 +78,7 @@ def cmd_status(core: Core, a) -> int:
     rt = core.engine.runtime(r) if r else None
     st = core.bnet.status(check_latest=a.check_updates)
     play = stats.load()
-    vk32 = proton.vulkan32_available()
+    vk32 = proton.vulkan32_available(env=core.engine.vulkan_env())
     if a.json:
         out = {
             "runner": r.name if r else None, "runtime": rt.name if rt else None,
@@ -155,13 +155,13 @@ def cmd_launch(core: Core, a) -> int:
 def cmd_bnet(core: Core, a) -> int:
     if not core.bnet.installed():
         core.setup(_progress())
-        _warn_vulkan32()
+        _warn_vulkan32(core)
         _after_launch(a)
         return 0
     args = ["--runonstartup"] if a.background else []
     proc, log = core.bnet.launch(args)
     print(f"Starting Battle.net (log: {log})")
-    _warn_vulkan32()
+    _warn_vulkan32(core)
     _after_launch(a)
     return 0
 
@@ -319,7 +319,7 @@ def cmd_curseforge(core: Core, a) -> int:
         return 0
     if a.action == "launch":
         _print_sync(curseforge.sync_games(core.bnet, core.engine))
-        log = cf.launch()
+        _, log = cf.launch()
         print(f"Starting CurseForge (log: {log})")
         return 0
     if a.action == "remove":

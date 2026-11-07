@@ -24,15 +24,16 @@ every game its own app-menu entry, icon and taskbar identity.
 Needs Python 3.11+, PyQt6, requests and Pillow (`sudo apt install python3-pyqt6 python3-requests python3-pil`).
 
 Battle.net also needs your graphics driver's **32-bit Vulkan driver**. It is a 32-bit program, and
-without one it closes right after it starts. Steam installs this driver, so you only need to add it
-yourself on a system without Steam:
+without one it closes right after it starts. Steam from your distribution's packages pulls this
+driver in. Flatpak and Snap Steam don't (they keep theirs inside their sandbox), so add it yourself
+unless your Steam came from apt, dnf or pacman:
 
 | System | 32-bit Vulkan driver |
 |---|---|
 | Debian, Ubuntu (AMD, Intel) | `sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install mesa-vulkan-drivers:i386` |
-| Debian, Ubuntu (NVIDIA) | the driver's 32-bit libraries: `nvidia-driver-libs:i386` (Debian), `libnvidia-gl-<version>:i386` (Ubuntu) |
+| Debian, Ubuntu (NVIDIA) | the driver's 32-bit libraries, after the same `dpkg --add-architecture i386 && apt update`: `nvidia-driver-libs:i386` (Debian), `libnvidia-gl-<version>:i386` (Ubuntu) |
 | Arch | `lib32-vulkan-radeon`, `lib32-vulkan-intel` or `lib32-nvidia-utils` (from `[multilib]`) |
-| Fedora | `mesa-vulkan-drivers.i686` |
+| Fedora | `mesa-vulkan-drivers.i686`; NVIDIA (RPM Fusion): `xorg-x11-drv-nvidia-libs.i686` |
 
 `glacier status` says whether it found one, and the GUI shows a banner when it is missing.
 
@@ -102,7 +103,7 @@ the prefix is idle. It needs X11/XWayland windows, so it doesn't apply with the 
 | `~/.local/share/glacier/runners/` | GE-Proton builds downloaded by Glacier |
 | `~/.local/share/glacier/runtimes/` | Steam Linux Runtime (only when Steam's copy isn't found) |
 | `~/.local/share/glacier/apps/` | `CurseForge.AppImage` (menu entry: `~/.local/share/applications/CurseForge.desktop`; its own settings live in `~/.config/CurseForge`) |
-| `~/.local/state/glacier/logs/` | one log per launch; `stats.json` holds playtime |
+| `~/.local/state/glacier/logs/` | one log per launch (`curseforge.log`: per CurseForge session); `stats.json` holds playtime |
 | `~/.local/share/applications/glacier-*.desktop` | menu entries (`X-Glacier-Managed=true`) |
 
 If you set a *game library folder*, Glacier maps it to a Windows drive (`D:` by default) and

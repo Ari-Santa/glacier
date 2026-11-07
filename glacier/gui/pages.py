@@ -656,7 +656,9 @@ class AddonsPage(QWidget):
         self.state.setStyleSheet(f"color: {color}; background: transparent;")
 
     def _refresh_wow(self, cf_installed: bool):
-        from ..curseforge import FLAVOUR_NAMES, installed_addons, wow_flavours
+        from datetime import datetime
+
+        from ..curseforge import FLAVOUR_NAMES, installed_addons, instances_file, wow_flavours
         while self.wow_rows.count():
             w = self.wow_rows.takeAt(0).widget()
             if w:
@@ -670,23 +672,29 @@ class AddonsPage(QWidget):
             self.wow_note.setText("World of Warcraft isn't installed yet. Install it in Battle.net; it shows up "
                                   "here and in CurseForge by itself.")
             return
-        by_folder = installed_addons()
+        try:
+            listed = installed_addons()
+        except Exception:       # a layout Glacier doesn't know must not empty the page
+            listed = None
         note = ("Glacier keeps CurseForge's list of these flavours in step with Battle.net "
                 "whenever CurseForge is closed." if cf_installed else
                 "Once CurseForge is installed, Glacier tells it where each of these flavours is.")
-        if by_folder and self._addons_mtime:
-            saved = time.localtime(self._addons_mtime)
-            when = time.strftime("%H:%M" if saved[:3] == time.localtime()[:3] else "%d %b %H:%M", saved)
-            note += (f" Addons and updates are as CurseForge last saw them ({when}); it looks for updates "
-                     "while it is open.")
+        if listed is None:
+            note += (f" Couldn't read CurseForge's addon list ({instances_file()}); it may be saving it "
+                     "right now.")
+        elif listed.checked and any(listed.folders.values()):
+            checked = listed.checked.astimezone()
+            today = checked.date() == datetime.now().astimezone().date()
+            note += (f" Updates as of CurseForge's last check ({checked.strftime('%H:%M' if today else '%d %b %H:%M')}"
+                     "); it checks while it is open.")
         self.wow_note.setText(note)
         for fl in flavours:
-            addons = by_folder.get(fl.path) if by_folder else None
+            addons = listed.folders.get(fl.path) if listed else None
             self.wow_rows.addWidget(self._flavour_widget(FLAVOUR_NAMES.get(fl.code, fl.code), fl,
-                                                         addons, cf_installed))
+                                                         addons, cf_installed, listed is not None))
 
     def _flavour_widget(self, title: str, fl: Flavour, addons: list[Addon] | None,
-                        cf_installed: bool) -> QWidget:
+                        cf_installed: bool, list_read: bool) -> QWidget:
         """One WoW flavour: where it is, and the addons CurseForge has installed there."""
         import html
         w = QWidget()
@@ -716,7 +724,7 @@ class AddonsPage(QWidget):
         v.addLayout(head)
 
         if addons is None:
-            if cf_installed:
+            if cf_installed and list_read:
                 v.addWidget(label("Not in CurseForge's list yet; Glacier adds it the next time it opens "
                                   "CurseForge.", muted=True, wrap=True))
             return w

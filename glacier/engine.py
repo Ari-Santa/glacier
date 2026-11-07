@@ -255,6 +255,10 @@ class Engine:
                 env[str(k)] = str(v)
         return env
 
+    def vulkan_env(self) -> dict[str, str]:
+        """What Battle.net's Vulkan loader sees: Glacier's environment plus the user's settings."""
+        return {**os.environ, **self.option_env(None)}
+
     def wrappers(self, uid: str | None) -> list[str]:
         c = self.cfg
         out: list[str] = []

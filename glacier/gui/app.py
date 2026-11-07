@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
         self._clear_status_when: str | None = None   # uid whose start ends the current status text
         self._quitting = False
         self.bnet_status = self.core.bnet.status()
-        self.vulkan32 = proton.vulkan32_available()
+        self.vulkan32 = proton.vulkan32_available(env=self.core.engine.vulkan_env())
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
@@ -472,9 +472,14 @@ class MainWindow(QMainWindow):
         self.tasks.start("Preparing Proton", lambda p, c: self.core.ensure_runner(p, c), done, key="runtime")
 
     def recheck_vulkan32(self):
-        self.vulkan32 = proton.vulkan32_available()
-        if self.vulkan32 is not False:
+        self.vulkan32 = proton.vulkan32_available(env=self.core.engine.vulkan_env())
+        checked = time.strftime("%H:%M:%S")
+        if self.vulkan32 is True:
             self.set_status("32-bit Vulkan driver found")
+        elif self.vulkan32 is False:
+            self.set_status(f"Still no 32-bit Vulkan driver found (checked {checked})", error=True)
+        else:
+            self.set_status("Couldn't tell whether a 32-bit Vulkan driver is installed")
         self.update_banner()
 
     def start_battlenet(self, background: bool = False):
@@ -577,6 +582,31 @@ class MainWindow(QMainWindow):
             return self.core.engine.spawn(spec)
         self.tasks.start("Running program", work, key="run-exe", quiet=True)
 
+    def _watch_curseforge(self, proc, log, text: str):
+        """Report a CurseForge that fails to start; the AppImage runtime stays up while it runs.
+
+        A start that only hands over to an open CurseForge exits 0 at once. A failing runtime
+        (no FUSE, a noexec or full $TMPDIR) exits non-zero, after extracting when it extracts,
+        hence the long watch.
+        """
+        started = time.monotonic()
+        timer = QTimer(self, interval=1000)
+
+        def check():
+            code = proc.poll()
+            if code is None and time.monotonic() - started < 45:
+                return
+            timer.stop()
+            timer.deleteLater()
+            if code:
+                self.set_status(f"CurseForge didn't start (exit code {code}). See {log.name} on the Logs page.",
+                                error=True)
+            elif self.status_msg.text() == text:
+                self.set_status("")
+
+        timer.timeout.connect(check)
+        timer.start()
+
     def curseforge_action(self, action: str):
         """install / update / open / remove the CurseForge AppImage."""
         cf = self.curseforge
@@ -584,13 +614,15 @@ class MainWindow(QMainWindow):
         if action == "open":
             try:
                 synced = sync_games(self.core.bnet, self.core.engine)
-                cf.launch()
+                proc, log = cf.launch()
             except (EngineError, OSError) as e:
                 QMessageBox.warning(self, "CurseForge", str(e))
             else:
                 extra = f" ({len(synced.added)} WoW folder(s) added, {len(synced.removed)} leftover(s) removed)" \
                     if synced.changed else ""
-                self.set_status("Starting CurseForge…" + extra)
+                text = "Starting CurseForge…" + extra
+                self.set_status(text)
+                self._watch_curseforge(proc, log, text)
             return
         if action == "remove":
             if QMessageBox.question(self, "Remove CurseForge",

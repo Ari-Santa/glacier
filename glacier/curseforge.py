@@ -142,6 +142,10 @@ def launch_env(info: AppImageInfo) -> dict[str, str]:
     env = {}
     if not can_mount(info):
         env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+        # The runtime extracts to $TMPDIR/appimage_extracted_<md5> and deletes that folder when
+        # it exits. A second start (a sign-in link, the menu while CurseForge is open) only hands
+        # over to the open window, and its cleanup would pull the files from under it.
+        env["NO_CLEANUP"] = "1"
     ssl = openssl_override()
     if ssl:
         env["DOTNET_OPENSSL_VERSION_OVERRIDE"] = ssl
@@ -531,24 +535,37 @@ def instances_file(config_dir: Path | None = None) -> Path:
 def file_version(f: dict) -> str:
     """A short version for a CurseForge file: "1.8.7" from "Narcissus-1.8.7.zip", else its date."""
     stem = re.sub(r"\.zip$", "", str(f.get("fileName") or ""), flags=re.IGNORECASE)
-    m = re.search(r"(?:^|[-_ .])(v?\d[\w.+-]*)$", stem)
-    out = m.group(1) if m else (str(f.get("fileDate") or "")[:10] or stem)
-    kind = RELEASE_TYPES.get(f.get("releaseType"))
+    # Packages are named "<addon folder>-<version>.zip", and folder names can hold digits
+    # themselves (LibSharedMedia-3.0, 3DPortraits), so skip a leading folder name first.
+    mods = f.get("modules") if isinstance(f.get("modules"), list) else []
+    folders = sorted((m["foldername"] for m in mods if isinstance(m, dict) and isinstance(m.get("foldername"), str)
+                      and m["foldername"]), key=len, reverse=True)
+    rest = next((stem[len(n) + 1:] for n in folders
+                 if stem.lower().startswith(n.lower()) and stem[len(n):len(n) + 1] in ("-", "_", " ", ".")), stem)
+    m = re.search(r"(?:^|[-_ .])([vVrR]?\d[\w.+-]*)$", rest)
+    out = m.group(1) if m else (str(f.get("fileDate") or "")[:10] or rest or stem)
+    rt = f.get("releaseType")
+    kind = RELEASE_TYPES.get(rt) if isinstance(rt, int) else None
     return f"{out} ({kind})" if kind and kind not in out.lower() else out
 
 
 @dataclass(frozen=True)
 class Addon:
-    addon_id: int
     name: str
     author: str
     url: str            # its CurseForge page ("" if unknown)
     version: str        # the installed file
-    latest: str         # the newer file CurseForge found ("" when there is none)
+    latest: str         # the newer file CurseForge would install ("" when there is none)
 
     @property
     def update(self) -> bool:
         return bool(self.latest)
+
+
+@dataclass
+class AddonList:
+    folders: dict[Path, list[Addon]]    # by WoW flavour folder, sorted by name
+    checked: datetime | None            # CurseForge's last look for updates
 
 
 def _addon(a: dict) -> Addon | None:
@@ -556,31 +573,53 @@ def _addon(a: dict) -> Addon | None:
     if not isinstance(inst, dict):
         return None
     new = a.get("latestFile")
+    # The same test CurseForge's own Update button uses (checkCanUpdateProject in its app),
+    # plus "not older": a beta installed on purpose isn't outdated by an older release.
     newer = (isinstance(new, dict) and new.get("id") not in (None, inst.get("id"))
              and str(new.get("fileDate") or "") >= str(inst.get("fileDate") or "")
-             and not a.get("preferenceIsIgnored"))
+             and not new.get("isEarlyAccessContent") and not a.get("preferenceIsIgnored")
+             and not a.get("isWorkingCopy") and not a.get("isFuzzyMatch"))
     authors = a.get("authors") if isinstance(a.get("authors"), list) else []
     author = a.get("primaryAuthor") or next((x.get("name") for x in authors if isinstance(x, dict)), "")
-    url = str(a.get("webSiteURL") or "")
-    return Addon(int(a.get("addonID") or 0), str(a.get("name") or a.get("fileNameOnDisk") or "?"),
-                 str(author or ""), url if url.startswith("https://") else "",
+    url = a.get("webSiteURL")
+    return Addon(str(a.get("name") or a.get("fileNameOnDisk") or "?"), str(author or ""),
+                 url if isinstance(url, str) and url.startswith("https://") else "",
                  file_version(inst), file_version(new) if newer else "")
 
 
-def installed_addons(config_dir: Path | None = None) -> dict[Path, list[Addon]]:
-    """CurseForge's WoW addons by flavour folder, sorted by name.
-    Empty when CurseForge has no list yet or it can't be read."""
+def _parse_time(value) -> datetime | None:
+    """A .NET timestamp from CurseForge's file ("...T18:43:08.4825421+01:00", "...Z"), or None."""
+    if not isinstance(value, str) or value.startswith("0001-"):      # DateTime.MinValue: never
+        return None
+    try:
+        t = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return t if t.tzinfo else t.replace(tzinfo=UTC)
+
+
+def installed_addons(config_dir: Path | None = None) -> AddonList | None:
+    """CurseForge's WoW addons. Empty when CurseForge has no list yet; None when the file is
+    there but can't be read (half written, or a layout Glacier doesn't know)."""
     try:
         entries = json.loads(instances_file(config_dir).read_text())
-    except (OSError, ValueError):
-        return {}
-    out: dict[Path, list[Addon]] = {}
-    for e in entries if isinstance(entries, list) else []:
+    except FileNotFoundError:
+        return AddonList({}, None)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    out = AddonList({}, None)
+    for e in entries:
         if not isinstance(e, dict) or e.get("gameTypeID") != WOW_GAME_ID or not isinstance(e.get("installPath"), str):
             continue
-        addons = [x for x in (_addon(a) for a in e.get("installedAddons") or [] if isinstance(a, dict)) if x]
-        out.setdefault(Path(_norm(e["installPath"])), []).extend(addons)
-    for addons in out.values():
+        listed = e.get("installedAddons") if isinstance(e.get("installedAddons"), list) else []
+        addons = [x for x in (_addon(a) for a in listed if isinstance(a, dict)) if x]
+        out.folders.setdefault(Path(_norm(e["installPath"])), []).extend(addons)
+        checked = _parse_time(e.get("lastRefreshAttempt"))
+        if checked and (out.checked is None or checked > out.checked):
+            out.checked = checked
+    for addons in out.folders.values():
         addons.sort(key=lambda x: x.name.casefold())
     return out
 
@@ -766,25 +805,49 @@ class CurseForge:
             p.unlink(missing_ok=True)
         desktop.refresh()
 
-    def launch(self) -> Path:
-        """Start CurseForge detached; returns its log file."""
+    def _remove_old_extractions(self, keep_current: bool) -> None:
+        """Drop CurseForge folders extract-and-run left in $TMPDIR (NO_CLEANUP keeps them), except
+        the current build's when this start reuses it. Only call while CurseForge is closed."""
+        tmp = Path(os.environ.get("TMPDIR") or tempfile.gettempdir())
+        try:
+            keep = f"appimage_extracted_{self.local_md5()}" if keep_current else ""
+            found = list(tmp.glob("appimage_extracted_*"))
+        except OSError:
+            return
+        for d in found:
+            try:
+                ours = d.is_dir() and not d.is_symlink() and d.stat().st_uid == os.getuid()
+            except OSError:
+                continue
+            if ours and d.name != keep and (d / "resources" / "app.asar").is_file() and (d / "curseforge").is_file():
+                shutil.rmtree(d, ignore_errors=True)
+
+    def launch(self) -> tuple[subprocess.Popen, Path]:
+        """Start CurseForge detached; returns the AppImage process and its log file."""
         if not self.installed():
             raise EngineError("CurseForge is not installed (glacier curseforge install)")
         try:
             info = inspect_appimage(self.appimage)
         except ValueError as e:
             raise EngineError(f"{self.appimage} is not an AppImage ({e})") from None
+        already = running()
         env = dict(os.environ)
         env.update(launch_env(info))
         if no_new_privs():
             env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
+            if already:     # see launch_env: this start only hands over to the open window
+                env["NO_CLEANUP"] = "1"
+        if not already:
+            self._remove_old_extractions(keep_current=bool(env.get("APPIMAGE_EXTRACT_AND_RUN")))
         paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
         log = paths.LOG_DIR / "curseforge.log"
-        # Append: a CurseForge that is already running keeps writing to this file, and
-        # truncating it under that writer leaves a hole of NUL bytes before its next line.
-        with open(log, "ab") as fh:
-            fh.write(f"\n--- Glacier started CurseForge at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
+        # A fresh log per CurseForge session. While one runs it keeps writing here, so a start
+        # that only hands over appends instead (truncating under a writer leaves a hole of NUL
+        # bytes), and O_APPEND keeps writers from overwriting each other's lines.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | (0 if already else os.O_TRUNC)
+        with os.fdopen(os.open(log, flags, 0o644), "wb") as fh:
+            fh.write(f"--- Glacier started CurseForge at {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
             fh.flush()
-            subprocess.Popen([str(self.appimage), *SANDBOX_ARGS], stdin=subprocess.DEVNULL, stdout=fh,
-                             stderr=subprocess.STDOUT, env=env, start_new_session=True)
-        return log
+            proc = subprocess.Popen([str(self.appimage), *SANDBOX_ARGS], stdin=subprocess.DEVNULL, stdout=fh,
+                                    stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        return proc, log

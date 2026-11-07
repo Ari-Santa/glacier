@@ -316,19 +316,19 @@ class BattleNet:
             return False
         if not isinstance(data, dict):
             return False
-        # Current clients keep the account in the top-level Client section; per-install
-        # sections (keyed by a hash) carry Services.LastCharacterInfo once someone has played.
-        # Services.LastLoginRegion proves nothing: the client writes it on its first start,
-        # before anyone logs in.
+        # Current clients keep a remembered account in the top-level Client section, and mark
+        # each game installed or played under Games.<product>, which takes a login. Services
+        # (LastLoginRegion, -Address, -Tassadar) prove nothing: the client writes them on its
+        # first start, before anyone logs in, and Games then only holds battle_net's ServerUid.
         sections = [data] + [v for v in data.values() if isinstance(v, dict)]
         for v in sections:
             client = v.get("Client")
-            services = v.get("Services")
             if isinstance(client, dict) and client.get("SavedAccountNames"):
                 return True
-            if isinstance(services, dict) and services.get("LastCharacterInfo"):
-                return True
-        return False
+        played = data.get("Games")
+        return isinstance(played, dict) and any(
+            isinstance(g, dict) and any(g.get(k) for k in ("LastPlayed", "LastInstalled", "LastActioned"))
+            for g in played.values())
 
     def status(self, check_latest: bool = False) -> BnetStatus:
         latest = ""

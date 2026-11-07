@@ -489,6 +489,19 @@ def test_vulkan32_available(tmp_path: Path, monkeypatch):
     assert check() is True
     monkeypatch.setenv("VK_DRIVER_FILES", "/somewhere/else.json")
     assert check() is None
+    # The environment Battle.net gets counts, including Glacier's own env setting.
+    monkeypatch.delenv("VK_DRIVER_FILES")
+    for key in ("VK_ICD_FILENAMES", "VK_DRIVER_FILES", "VK_ADD_DRIVER_FILES"):
+        assert proton.vulkan32_available((str(icd),), (str(lib32),), env={key: "/opt/x/icd32.json"}) is None
+    assert proton.vulkan32_available((str(icd),), (str(lib32),), env={}) is True
+
+
+def test_vulkan_env_includes_settings(engine: Engine, monkeypatch):
+    monkeypatch.setenv("GLACIER_TEST_OUTER", "1")
+    engine.cfg.update(env={"VK_ICD_FILENAMES": "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"})
+    env = engine.vulkan_env()
+    assert env["GLACIER_TEST_OUTER"] == "1"
+    assert env["VK_ICD_FILENAMES"].endswith("radeon_icd.x86_64.json")
 
 
 def test_cli_progress_without_terminal(monkeypatch, capsys):
@@ -505,11 +518,14 @@ def test_cli_progress_without_terminal(monkeypatch, capsys):
     assert lines[-2:] == ["Downloading GE-Proton11-12 (540 / 540 MiB) (100%)", "Verifying GE-Proton11-12"]
     assert 4 <= len(lines) <= 6                  # one line per MiB before
 
-    monkeypatch.setattr(proton, "vulkan32_available", lambda: False)
-    cli._warn_vulkan32()
-    assert "mesa-vulkan-drivers:i386" in capsys.readouterr().err
-    monkeypatch.setattr(proton, "vulkan32_available", lambda: None)
-    cli._warn_vulkan32()
+    # The check sees the environment Battle.net will get, settings included.
+    core = type("FakeCore", (), {"engine": type("FakeEngine", (), {"vulkan_env": lambda self: {"K": "v"}})()})()
+    seen = []
+    monkeypatch.setattr(proton, "vulkan32_available", lambda env: seen.append(env) or False)
+    cli._warn_vulkan32(core)
+    assert "mesa-vulkan-drivers:i386" in capsys.readouterr().err and seen == [{"K": "v"}]
+    monkeypatch.setattr(proton, "vulkan32_available", lambda env: None)
+    cli._warn_vulkan32(core)
     assert capsys.readouterr().err == ""
 
 
@@ -529,21 +545,29 @@ def test_logged_in_hint_top_level_client(engine: Engine):
     # Battle.net 2.5x keeps the remembered account in the top-level Client section.
     bn = _bnet_config(engine, {"Client": {"SavedAccountNames": "someone@example.com"}})
     assert bn.logged_in_hint()
-    bn = _bnet_config(engine, {"5a61123b37cafce1": {"Services": {"LastCharacterInfo": "x"}}})
+    # A game installed or played needs a login, saved account name or not.
+    bn = _bnet_config(engine, {"Games": {"battle_net": {"ServerUid": "battle.net"},
+                                         "wow": {"ServerUid": "wow", "LastPlayed": "1762539191"}}})
     assert bn.logged_in_hint()
     bn = _bnet_config(engine, {"Client": {"Version": {"FirstRun": "false"}}})
     assert not bn.logged_in_hint()
 
 
 def test_logged_in_hint_fresh_install(engine: Engine):
-    # What Battle.net 2.53 writes on its first start, before anyone logs in (Debian 13 test).
+    # What Battle.net 2.53 wrote on its first start, before anyone logged in (Debian 13 test).
     bn = _bnet_config(engine, {
-        "Client": {"Version": {"FirstRun": "false", "Release": {"FirstRun": "false"}}},
-        "5a61123b37cafce1": {"Client": {"Language": "enUS"}, "Path": "C:\\Program Files (x86)\\Battle.net",
-                             "Services": {"LastLoginRegion": "US"}},
+        "Client": {"Version": {"FirstRun": "false", "Release": {"FirstRun": "false", "LastBuildVersion": "17986"}},
+                   "Toasts": {"ScreenPosition": "BottomRight", "Monitor": "0"},
+                   "GaClientId": "00000000-0000-0000-0000-000000000000"},
+        "5a61123b37cafce1": {"Client": {"Language": "enUS",
+                                        "LoginSettings": {"AllowedRegions": "", "AllowedLocales": ""}},
+                             "Path": "C:\\Program Files (x86)\\Battle.net",
+                             "Services": {"LastLoginRegion": "EU", "LastLoginAddress": "eu.actual.battle.net",
+                                          "LastLoginTassadar": "account.battle.net"}},
+        "Games": {"battle_net": {"ServerUid": "battle.net"}},
     })
     assert not bn.logged_in_hint()
-    assert bn.login_region() == "us"
+    assert bn.login_region() == "eu"
 
 
 def test_apply_config_default_install_path(engine: Engine):
@@ -740,12 +764,12 @@ def test_curseforge_install_update_remove(cf_env, tmp_path: Path, monkeypatch):
     assert state["downloads"] == 2 and cf.appimage.read_bytes() == good
     state["corrupt"] = False
 
-    # Without FUSE the entry makes the AppImage extract itself instead of mounting, and with
-    # only OpenSSL 4 it points the addon agent at it.
+    # Without FUSE the entry makes the AppImage extract itself instead of mounting (keeping the
+    # folder, which a second start shares), and with only OpenSSL 4 it points the addon agent at it.
     monkeypatch.setattr(curseforge, "can_mount", lambda info: False)
     monkeypatch.setattr(curseforge, "openssl_override", lambda: "4")
     cf.integrate()
-    assert (f'Exec=env APPIMAGE_EXTRACT_AND_RUN=1 DOTNET_OPENSSL_VERSION_OVERRIDE=4 "{cf.appimage}" '
+    assert (f'Exec=env APPIMAGE_EXTRACT_AND_RUN=1 NO_CLEANUP=1 DOTNET_OPENSSL_VERSION_OVERRIDE=4 "{cf.appimage}" '
             "--no-sandbox %U\n") in (paths.APPLICATIONS_DIR / curseforge.DESKTOP_ID).read_text()
 
     cf.remove()
@@ -776,21 +800,53 @@ def test_curseforge_launch_without_privileges(cf_env, tmp_path: Path, monkeypatc
     cf, state = cf_env
     cf.install()
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
     started = []
-    monkeypatch.setattr(curseforge.subprocess, "Popen", lambda cmd, **kw: started.append(kw["env"]))
+
+    def fake_popen(cmd, **kw):
+        started.append(kw["env"])
+        kw["stdout"].write(b"CurseForge output\n")
+        return f"proc{len(started)}"
+    monkeypatch.setattr(curseforge.subprocess, "Popen", fake_popen)
+    open_now = [False]
+    monkeypatch.setattr(curseforge, "running", lambda: open_now[0])
+
+    # Earlier extract-and-run folders: an old build's goes, the current build's and others stay.
+    def extracted(name, curseforge_files=True):
+        d = tmp_path / "tmp" / name
+        (d / "resources").mkdir(parents=True)
+        if curseforge_files:
+            (d / "curseforge").write_bytes(b"")
+            (d / "resources" / "app.asar").write_bytes(b"")
+        return d
+    old, current = extracted("appimage_extracted_0123"), extracted(f"appimage_extracted_{cf.local_md5()}")
+    other_app = extracted("appimage_extracted_4567", curseforge_files=False)
 
     # Under no_new_privs the setuid fusermount can't mount it, so it extracts itself instead.
     monkeypatch.setattr(curseforge, "no_new_privs", lambda: True)
-    log = cf.launch()
-    assert started[-1].get("APPIMAGE_EXTRACT_AND_RUN") == "1"
+    proc, log = cf.launch()
+    assert proc == "proc1" and started[-1].get("APPIMAGE_EXTRACT_AND_RUN") == "1"
+    assert "NO_CLEANUP" not in started[-1]                 # the first one cleans up after itself
+    assert not old.exists() and current.is_dir() and other_app.is_dir()
+    # A second start only hands over to the open window; its cleanup must not take the
+    # running CurseForge's files with it.
+    open_now[0] = True
+    cf.launch()
+    assert started[-1].get("NO_CLEANUP") == "1"
     # ... but the menu entry, which the desktop starts without that flag, still mounts it.
     cf.integrate()
     assert f'Exec="{cf.appimage}" --no-sandbox %U\n' in (paths.APPLICATIONS_DIR / curseforge.DESKTOP_ID).read_text()
 
+    # While CurseForge runs, starts append to its log (truncating under that writer leaves NUL bytes)...
+    text = log.read_text()
+    assert text.count("Glacier started CurseForge") == 2 and text.count("CurseForge output") == 2
+    # ... and once it is closed, the next start begins a fresh log. Mounting needs no extracted
+    # copy, so the one the hand-over left behind goes too.
+    open_now[0] = False
     monkeypatch.setattr(curseforge, "no_new_privs", lambda: False)
-    assert cf.launch() == log and "APPIMAGE_EXTRACT_AND_RUN" not in started[-1]
-    # The log is appended to, never truncated under a CurseForge that is still writing to it.
-    assert log.read_text().count("Glacier started CurseForge") == 2
+    assert cf.launch() == ("proc3", log) and "APPIMAGE_EXTRACT_AND_RUN" not in started[-1]
+    assert log.read_text().count("Glacier started CurseForge") == 1
+    assert not current.exists() and other_app.is_dir()
 
 
 def test_curseforge_no_new_privs_reads_proc():
@@ -934,6 +990,16 @@ def test_curseforge_sync_instances(tmp_path: Path):
 
 def test_curseforge_file_version():
     from glacier.curseforge import file_version
+
+    def named(file_name, *folders):
+        return file_version({"fileName": file_name, "modules": [{"foldername": f} for f in folders]})
+    # The addon's folder name can hold digits itself; the version follows it.
+    assert named("LibSharedMedia-3.0-v11.2.0.zip", "LibSharedMedia-3.0") == "v11.2.0"
+    assert named("Prat-3.0-3.9.50.zip", "Prat-3.0", "Prat-3.0_Libraries") == "3.9.50"
+    assert named("3DPortraits-1.2.zip", "3DPortraits") == "1.2"
+    assert named("CallbackHandler-1.0-r8.zip", "CallbackHandler-1.0") == "r8"
+    assert named("Gears-2026.11.3.zip", "Gears", "Gears-OptionsUI") == "2026.11.3"
+    assert file_version({"fileName": "Foo-1.0.zip", "releaseType": [2], "modules": "x"}) == "1.0"
     assert file_version({"fileName": "Narcissus-1.8.7-b.zip"}) == "1.8.7-b"
     assert file_version({"fileName": "BtWLoadouts-v1.20.25.zip"}) == "v1.20.25"
     assert file_version({"fileName": "BetterTransmog.2.0.6.zip"}) == "2.0.6"
@@ -946,6 +1012,7 @@ def test_curseforge_file_version():
 
 def test_curseforge_installed_addons(tmp_path: Path):
     import json
+    from datetime import UTC, datetime
 
     from glacier import curseforge
 
@@ -956,17 +1023,25 @@ def test_curseforge_installed_addons(tmp_path: Path):
                 "latestFile": latest and {"id": latest[0], "fileName": latest[1], "fileDate": latest[2]}, **extra}
 
     retail = "/games/World of Warcraft/_retail_/"
+    early = addon(5, "Early", (50, "E-1.zip", "2026-01-01"), (51, "E-2.zip", "2026-02-01"))
+    early["latestFile"]["isEarlyAccessContent"] = True
     entries = [
-        {"gameTypeID": 1, "installPath": retail, "installedAddons": [
+        {"gameTypeID": 1, "installPath": retail, "lastRefreshAttempt": "2026-11-07T18:43:08.4825421+01:00",
+         "installedAddons": [
             addon(2, "zeta", (20, "Zeta-1.0.zip", "2026-01-01"), (21, "Zeta-1.1.zip", "2026-02-01")),
             addon(1, "Alpha", (10, "Alpha-2.0.zip", "2026-01-01"), (10, "Alpha-2.0.zip", "2026-01-01")),
             # Ignored in CurseForge, or "latest" older than the installed beta: no update.
             addon(3, "Ignored", (30, "I-1.zip", "2026-01-01"), (31, "I-2.zip", "2026-03-01"),
                   preferenceIsIgnored=True),
             addon(4, "Beta", (40, "B-2.0b.zip", "2026-03-01"), (39, "B-1.9.zip", "2026-02-01")),
+            # CurseForge's Update button skips these too: early access, a guessed match, a git checkout.
+            early,
+            addon(6, "Fuzzy", (60, "F-1.zip", "2026-01-01"), (61, "F-2.zip", "2026-02-01"), isFuzzyMatch=True),
+            addon(7, "Mine", (70, "M-1.zip", "2026-01-01"), (71, "M-2.zip", "2026-02-01"), isWorkingCopy=True),
             {"name": "broken"}, "not a dict",
         ]},
-        {"gameTypeID": 1, "installPath": "/games/World of Warcraft/_classic_/", "installedAddons": []},
+        {"gameTypeID": 1, "installPath": "/games/World of Warcraft/_classic_/", "installedAddons": [],
+         "lastRefreshAttempt": "0001-01-01T00:00:00"},
         {"gameTypeID": 432, "installPath": "/minecraft/", "installedAddons": [addon(9, "Mod", (90, "m.zip", ""))]},
     ]
     f = curseforge.instances_file(tmp_path)
@@ -974,18 +1049,30 @@ def test_curseforge_installed_addons(tmp_path: Path):
     f.write_text(json.dumps(entries))
 
     got = curseforge.installed_addons(tmp_path)
-    assert set(got) == {Path(retail), Path("/games/World of Warcraft/_classic_")}
-    addons = got[Path(retail)]
-    assert [a.name for a in addons] == ["Alpha", "Beta", "Ignored", "zeta"]
+    assert set(got.folders) == {Path(retail), Path("/games/World of Warcraft/_classic_")}
+    addons = got.folders[Path(retail)]
+    assert [a.name for a in addons] == ["Alpha", "Beta", "Early", "Fuzzy", "Ignored", "Mine", "zeta"]
     assert [a.name for a in addons if a.update] == ["zeta"]
     zeta = addons[-1]
     assert (zeta.version, zeta.latest, zeta.author) == ("1.0", "1.1", "someone")
     assert zeta.url == "https://www.curseforge.com/wow/addons/2"
+    # CurseForge's own last check, not the file's time (Glacier's sync rewrites the file too).
+    assert got.checked == datetime(2026, 11, 7, 17, 43, 8, 482542, tzinfo=UTC)
 
-    # No list yet, or one CurseForge is halfway through writing: nothing, not an error.
-    assert curseforge.installed_addons(tmp_path / "none") == {}
+    # No list yet: nothing. A file that can't be read is not mistaken for an empty list.
+    assert curseforge.installed_addons(tmp_path / "none") == curseforge.AddonList({}, None)
     f.write_text(json.dumps(entries)[:40])
-    assert curseforge.installed_addons(tmp_path) == {}
+    assert curseforge.installed_addons(tmp_path) is None
+    f.write_text(json.dumps({"not": "a list"}))
+    assert curseforge.installed_addons(tmp_path) is None
+    # Odd values are skipped, never raised into the page.
+    f.write_text(json.dumps([{"gameTypeID": 1, "installPath": retail, "installedAddons": 5},
+                             {"gameTypeID": 1, "installPath": "/x/_ptr_/", "lastRefreshAttempt": "soon",
+                              "installedAddons": [{"addonID": "abc", "name": 7, "webSiteURL": ["x"],
+                                                   "authors": ["y"], "installedFile": {"releaseType": [2]}}]}]))
+    odd = curseforge.installed_addons(tmp_path)
+    assert odd.folders[Path(retail)] == [] and odd.checked is None
+    assert [(a.name, a.url) for a in odd.folders[Path("/x/_ptr_")]] == [("7", "")]
 
 
 def test_curseforge_sync_first_start(tmp_path: Path):

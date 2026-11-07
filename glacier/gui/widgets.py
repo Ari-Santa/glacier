@@ -76,7 +76,7 @@ def repolish(w: QWidget) -> None:
 
 
 # Text for icon-only buttons when no icon theme provides the icon (desktops without one).
-_GLYPHS = {"view-refresh": "↻"}
+_GLYPHS = {"view-refresh": "↻", "window-close": "✕"}
 
 
 def button(text: str, kind: str = "", icon_name: str = "", tip: str = "") -> QPushButton:
