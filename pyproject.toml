@@ -1,6 +1,6 @@
 [project]
 name = "glacier"
-version = "0.4.0"
+version = "0.4.1"
 description = "Battle.net launcher for Linux built on Proton"
 requires-python = ">=3.11"
 dependencies = ["PyQt6", "requests", "Pillow"]
