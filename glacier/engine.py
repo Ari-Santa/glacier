@@ -25,6 +25,14 @@ class EngineError(RuntimeError):
     pass
 
 
+def split_args(text: str | None, what: str) -> list[str]:
+    """Split a command line from the settings; unbalanced quotes become a readable error."""
+    try:
+        return shlex.split(text or "")
+    except ValueError as e:
+        raise EngineError(f"{what} can't be read ({e}). Check the quotes.") from None
+
+
 @dataclass
 class WineProc:
     pid: int
@@ -265,9 +273,9 @@ class Engine:
         if c.effective(uid, "gamemode") and shutil.which("gamemoderun"):
             out.append("gamemoderun")
         if c.effective(uid, "gamescope") and shutil.which("gamescope"):
-            out += ["gamescope", *shlex.split(c["gamescope_args"] or ""), "--"]
+            out += ["gamescope", *split_args(c["gamescope_args"], "The Gamescope arguments"), "--"]
         if c["wrapper"]:
-            out += shlex.split(c["wrapper"])
+            out += split_args(c["wrapper"], "The wrapper command")
         return out
 
     def fingerprint(self, uid: str | None) -> str:
@@ -393,7 +401,7 @@ class Engine:
                 continue
             for item in environ.split(b"\0"):
                 if item.startswith(b"WINEPREFIX="):
-                    if os.path.realpath(item[11:].decode()) == want:
+                    if os.path.realpath(item[11:].decode("utf-8", "replace")) == want:
                         return True
         return False
 
@@ -452,5 +460,6 @@ class Engine:
         if progress:
             progress("Applying Battle.net prefix tweaks", -1)
         # Battle.net probes the Windows Location API; Wine's stub can crash or hang it.
-        self.reg_add(r"HKCU\Software\Wine\DllOverrides", "locationapi", "")
-        marker.write_text(version)
+        rc = self.reg_add(r"HKCU\Software\Wine\DllOverrides", "locationapi", "")
+        if rc == 0:         # otherwise try again on the next start
+            marker.write_text(version)

@@ -455,6 +455,33 @@ def remove_runner(runner: Runner) -> None:
     shutil.rmtree(runner.path)
 
 
+_RUNTIME_VERSION = re.compile(r"\d+(?:\.\d+)+")
+
+
+def _runtime_source(url: str) -> tuple[str, str]:
+    """Where to get a runtime tarball, and Valve's SHA-256 for it ("" when unknown).
+
+    The "latest" folder is served file by file from a CDN whose copies go out of step: its
+    SHA256SUMS can describe an older build than its tarball. So read the version it names and
+    take both from that version's own folder, which never changes. Without a usable version
+    or checksum list, fall back to the latest link, unverified.
+    """
+    folder, _, name = url.rpartition("/")
+    try:
+        version = download.get_text(f"{folder}/VERSION.txt").strip()
+        if not _RUNTIME_VERSION.fullmatch(version):
+            return url, ""
+        pinned = f"{folder.rpartition('/')[0]}/{version}"
+        sums = download.get_text(f"{pinned}/SHA256SUMS")
+    except OSError:                 # requests' errors are OSErrors
+        return url, ""
+    for line in sums.splitlines():
+        digest, _, listed = line.partition(" ")
+        if listed.strip().lstrip("*") == name and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            return f"{pinned}/{name}", digest.lower()
+    return url, ""
+
+
 def install_runtime(appid: str, progress: ProgressFn | None = None,
                     cancel: threading.Event | None = None) -> Runtime:
     if appid not in RUNTIMES:
@@ -467,7 +494,14 @@ def install_runtime(appid: str, progress: ProgressFn | None = None,
         if progress:
             progress(f"Downloading {name} ({done >> 20} MiB)", done / total if total else -1)
 
-    download.download(url, archive, on_bytes, cancel)
+    source, expected = _runtime_source(url)
+    download.download(source, archive, on_bytes, cancel)
+    if expected:
+        if progress:
+            progress(f"Verifying {name}", -1)
+        if download.file_hash(archive, "sha256") != expected:
+            archive.unlink(missing_ok=True)
+            raise RuntimeError(f"Checksum mismatch for {archive.name}; download removed.")
     final = _extract(archive, paths.RUNTIMES_DIR, progress, cancel, name)
     archive.unlink(missing_ok=True)
     if final.name != dirname:

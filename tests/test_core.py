@@ -1272,3 +1272,245 @@ def test_describe_error():
     assert describe_error(requests.ConnectionError("x")).startswith("Couldn't connect to the server.")
     assert describe_error(PermissionError(13, "Permission denied")) == "[Errno 13] Permission denied"
     assert describe_error(RuntimeError()) == "RuntimeError"
+
+
+# ----------------------------------------------------------------------------- review fixes
+
+def test_uninstaller_matches_product_uid(engine: Engine, tmp_path: Path):
+    """WoW flavours share a folder: only the uninstaller registered for that product may run."""
+    from glacier.battlenet import BattleNet
+    from glacier.engine import EngineError
+    from glacier.library import GameState, Library
+    agent = engine.drive_c / "ProgramData" / "Battle.net" / "Agent"
+    agent.mkdir(parents=True)
+    (agent / "Blizzard Uninstaller.exe").write_bytes(b"MZ")
+    wow_dir = tmp_path / "library" / "World of Warcraft"
+    wow_dir.mkdir()
+    d4_dir = tmp_path / "library" / "Diablo IV"
+    (d4_dir / "unins000.exe").write_bytes(b"MZ")
+    key = r"[Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\%s] 1793880"
+    (engine.pfx / "system.reg").write_text("WINE REGISTRY Version 2\n\n" + "\n\n".join([
+        "\n".join([key % "World of Warcraft", r'"DisplayName"="World of Warcraft"',
+                   r'"InstallLocation"="D:\\World of Warcraft"',
+                   r'"UninstallString"="\"C:\\ProgramData\\Battle.net\\Agent\\Blizzard Uninstaller.exe\" '
+                   r'--lang=enUS --uid=wow --displayname=\"World of Warcraft\""']),
+        "\n".join([key % "Diablo IV", r'"DisplayName"="Diablo IV"', r'"InstallLocation"="D:\\Diablo IV"',
+                   r'"UninstallString"="\"D:\\Diablo IV\\unins000.exe\" /S"']),
+    ]) + "\n")
+    lib = Library(engine, BattleNet(engine))
+    lib.states = {uid: GameState(games.lookup(uid), installed=True, install_dir=wow_dir, db_uid=uid)
+                  for uid in ("wow", "wowf")}
+    lib.states["fenris"] = GameState(games.lookup("fenris"), installed=True, install_dir=d4_dir, db_uid="fenris")
+
+    exe, args = lib.uninstall_command("wow")
+    assert exe.endswith("Blizzard Uninstaller.exe") and "--uid=wow" in args
+    assert lib.uninstall_command("wowf") is None           # not retail's uninstaller
+    with pytest.raises(EngineError, match="No uninstaller registered"):
+        lib.uninstall("wowf")
+    # An uninstaller that names no product still matches by its own folder.
+    assert lib.uninstall_command("fenris") == (str(d4_dir / "unins000.exe"), ["/S"])
+
+
+class _FakeResponse:
+    def __init__(self, status, headers, body=b""):
+        self.status_code, self.headers, self.body = status, headers, body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise OSError(f"HTTP {self.status_code}")
+
+    def iter_content(self, chunk):
+        yield from (self.body[i:i + 4] for i in range(0, len(self.body), 4))
+
+
+def _fake_server(monkeypatch, answers: list):
+    """download.session() whose GETs return `answers` in turn; returns the request headers seen."""
+    from glacier import download
+    seen: list[dict] = []
+
+    class Session:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url, headers=None, **kw):
+            seen.append(dict(headers or {}))
+            return answers.pop(0)
+
+    monkeypatch.setattr(download, "session", Session)
+    return seen
+
+
+def test_download_resumes_only_the_same_file(tmp_path: Path, monkeypatch):
+    from glacier import download
+    dest = tmp_path / "file.bin"
+    part, tag = tmp_path / "file.bin.part", tmp_path / "file.bin.part.tag"
+
+    # The connection drops after 6 of 10 bytes: an error, and the .part stays for a resume.
+    seen = _fake_server(monkeypatch, [_FakeResponse(200, {"Content-Length": "10", "ETag": '"v1"'}, b"012345")])
+    with pytest.raises(download.Incomplete):
+        download.download("https://x/file.bin", dest)
+    assert not dest.exists() and part.read_bytes() == b"012345" and tag.read_text() == '"v1"'
+    assert "Range" not in seen[0]
+
+    # The resume names the file it has a part of; the server sends the rest.
+    seen = _fake_server(monkeypatch, [_FakeResponse(206, {"Content-Length": "4"}, b"6789")])
+    assert download.download("https://x/file.bin", dest) == dest
+    assert seen[0]["Range"] == "bytes=6-" and seen[0]["If-Range"] == '"v1"'
+    assert dest.read_bytes() == b"0123456789" and not part.exists() and not tag.exists()
+
+    # The link now serves a newer build: If-Range makes the server send all of it (200).
+    part.write_bytes(b"012345")
+    tag.write_text('"v1"')
+    _fake_server(monkeypatch, [_FakeResponse(200, {"Content-Length": "8", "ETag": '"v2"'}, b"NEWBUILD")])
+    download.download("https://x/file.bin", dest)
+    assert dest.read_bytes() == b"NEWBUILD"
+
+    # A .part of unknown origin is not resumed.
+    part.write_bytes(b"junk")
+    seen = _fake_server(monkeypatch, [_FakeResponse(200, {"Content-Length": "3"}, b"abc")])
+    download.download("https://x/file.bin", dest)
+    assert "Range" not in seen[0] and dest.read_bytes() == b"abc"
+
+    # 416: a complete .part is taken as it is; one that is too long starts over.
+    part.write_bytes(b"0123456789")
+    tag.write_text('"v1"')
+    _fake_server(monkeypatch, [_FakeResponse(416, {"Content-Range": "bytes */10"})])
+    download.download("https://x/file.bin", dest)
+    assert dest.read_bytes() == b"0123456789"
+    part.write_bytes(b"0123456789")
+    tag.write_text('"v1"')
+    seen = _fake_server(monkeypatch, [_FakeResponse(416, {"Content-Range": "bytes */3"}),
+                                      _FakeResponse(200, {"Content-Length": "3"}, b"abc")])
+    download.download("https://x/file.bin", dest)
+    assert dest.read_bytes() == b"abc" and "Range" not in seen[1]
+
+
+def test_runtime_comes_from_its_versioned_folder(monkeypatch):
+    """Valve's "latest" folder can pair a new tarball with an old SHA256SUMS; the version's own
+    folder is consistent, so both come from there."""
+    from glacier import download, proton
+    digest = "44ac1a893aab6d8b602e08f36e857c1aaae268a7842731683b09db83dc627f24"
+    url = proton.RUNTIMES["4183110"][2]
+    latest = url.rsplit("/", 1)[0]
+    pinned = latest.rsplit("/", 1)[0] + "/4.0.20261110.268882"
+    pages = {f"{latest}/VERSION.txt": "4.0.20261110.268882\n",
+             f"{pinned}/SHA256SUMS": f"{'0' * 64} *BUILD_ID.txt\n{digest.upper()} *SteamLinuxRuntime_4.tar.xz\n"}
+
+    def fake_text(u, timeout=15):
+        if u not in pages:
+            raise OSError(f"404 {u}")
+        return pages[u]
+
+    monkeypatch.setattr(download, "get_text", fake_text)
+    assert proton._runtime_source(url) == (f"{pinned}/SteamLinuxRuntime_4.tar.xz", digest)
+    # No usable version, or no checksum for the file: the latest link, unverified.
+    pages[f"{latest}/VERSION.txt"] = "../../evil\n"
+    assert proton._runtime_source(url) == (url, "")
+    pages[f"{latest}/VERSION.txt"] = "4.0.20261110.268882\n"
+    pages[f"{pinned}/SHA256SUMS"] = f"{digest} *SteamLinuxRuntime_4-arm64.tar.xz\n"
+    assert proton._runtime_source(url) == (url, "")
+    del pages[f"{pinned}/SHA256SUMS"]
+    assert proton._runtime_source(url) == (url, "")
+
+
+def test_config_keeps_what_another_process_saved(tmp_path: Path):
+    """The open window and `glacier config` both write config.json; neither undoes the other."""
+    window = Config(tmp_path / "c.json")
+    window.update(mangohud=True)
+    cli = Config(tmp_path / "c.json")
+    cli.update(runner="glacier:GE-Proton11-12")
+    cli.set_game("wow", launch_mode="direct")
+    window.update(tray=False)
+    window.set_game("fenris", gamemode=True)
+    saved = Config(tmp_path / "c.json")
+    assert saved["runner"] == "glacier:GE-Proton11-12" and saved["mangohud"] is True and saved["tray"] is False
+    assert saved.game("wow")["launch_mode"] == "direct" and saved.game("fenris")["gamemode"] is True
+
+
+def test_menu_entry_rewritten_only_when_it_changes():
+    file_id = "glacier-test-unchanged.desktop"
+    try:
+        path = desktop.write_entry(file_id, "Test", ["launch", "wow"], "glacier-wow")
+        first = path.stat()
+        assert desktop.write_entry(file_id, "Test", ["launch", "wow"], "glacier-wow") == path
+        assert path.stat().st_ino == first.st_ino and path.stat().st_mtime_ns == first.st_mtime_ns
+        desktop.write_entry(file_id, "Test 2", ["launch", "wow"], "glacier-wow")
+        assert "Name=Test 2\n" in path.read_text() and path.stat().st_mode & 0o777 == 0o755
+    finally:
+        desktop.remove_entry(file_id)
+
+
+def test_tweaks_retried_after_a_failed_reg_add(engine: Engine, monkeypatch):
+    marker = engine.compat_dir / ".glacier-tweaks"
+    codes = [1, 0]
+    calls = []
+    monkeypatch.setattr(engine, "reg_add", lambda *a, **kw: (calls.append(a), codes.pop(0))[1])
+    engine.apply_tweaks()
+    assert not marker.exists()
+    engine.apply_tweaks()
+    assert marker.read_text() == "1"
+    engine.apply_tweaks()                   # done: no third reg add
+    assert len(calls) == 2
+
+
+def test_unbalanced_quotes_in_settings_are_explained(engine: Engine):
+    from glacier.engine import EngineError
+    engine.cfg["wrapper"] = 'obs-gamecapture "oops'
+    with pytest.raises(EngineError, match="wrapper command"):
+        engine.wrappers(None)
+    with pytest.raises(EngineError, match="wrapper command"):
+        engine.fingerprint(None)
+
+
+def test_cli_config_checks_key_and_type(tmp_path: Path, capsys):
+    from types import SimpleNamespace
+
+    from glacier import cli
+    core = SimpleNamespace(cfg=Config(tmp_path / "c.json"))
+
+    def run(key, value):
+        return cli.cmd_config(core, SimpleNamespace(key=key, value=value))
+
+    assert run("mangohudd", "true") == 2
+    assert "did you mean mangohud" in capsys.readouterr().err
+    assert run("mangohud", "yes") == 2
+    assert "true or false" in capsys.readouterr().err
+    assert run("mangohud", "true") == 0 and core.cfg["mangohud"] is True
+    assert run("wrapper", "5") == 0 and core.cfg["wrapper"] == "5"
+    assert run("env", '{"A": "1"}') == 0 and core.cfg["env"] == {"A": "1"}
+    assert "mangohudd" not in Config(tmp_path / "c.json").data
+
+
+def test_exe_without_icon_gets_its_placeholder_once(engine: Engine, tmp_path: Path, monkeypatch):
+    from glacier import paths
+    from glacier.battlenet import BattleNet
+    from glacier.library import GameState, Library
+    icons = tmp_path / "icons"
+    monkeypatch.setattr(paths, "ICONS_DIR", icons)
+    made = []
+
+    def fake_placeholder(name, initials, color):
+        made.append(name)
+        icons.mkdir(parents=True, exist_ok=True)
+        (icons / f"{name}.png").write_bytes(b"png")
+        return icons / f"{name}.png"
+
+    monkeypatch.setattr(desktop, "install_placeholder_icon", fake_placeholder)
+    exe = tmp_path / "library" / "Diablo IV" / "Diablo IV.exe"
+    exe.write_bytes(b"not a PE file")
+    lib = Library(engine, BattleNet(engine))
+    st = GameState(games.lookup("fenris"), installed=True, install_dir=exe.parent, exe=exe)
+    lib.ensure_icon(st)
+    lib.ensure_icon(st)
+    assert made == ["glacier-fenris"]
+    lib.ensure_icon(st, force=True)
+    assert len(made) == 2

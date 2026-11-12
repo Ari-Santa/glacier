@@ -54,7 +54,6 @@ def _load():
 
 # Windows vanish all the time; never let Xlib's default handler exit the process.
 _ERROR_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda d, e: 0)
-_IO_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)(lambda d: 0)
 
 
 class X11:

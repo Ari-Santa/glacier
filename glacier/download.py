@@ -56,26 +56,66 @@ def get_json(url: str, timeout: float = 15):
         return r.json()
 
 
+class Incomplete(OSError):
+    """The server closed the connection before the whole file had arrived."""
+
+
+def _validator(headers) -> str:
+    """What If-Range can name the file by: a strong ETag, else its Last-Modified date."""
+    etag = headers.get("ETag", "")
+    if etag and not etag.startswith("W/"):
+        return etag
+    return headers.get("Last-Modified", "")
+
+
 def download(url: str, dest: Path, progress: ProgressFn | None = None,
              cancel: threading.Event | None = None, chunk: int = 1 << 20) -> Path:
-    """Download url to dest, resuming a previous .part file when the server allows it."""
+    """Download url to dest, resuming a previous .part file when the server still has that file.
+
+    Next to the .part sits a .part.tag with the ETag (or date) of the file it came from. A resume
+    sends it as If-Range, so a "latest" link that moved on to a newer build restarts from zero
+    instead of gluing two builds together.
+    """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
+    tag = dest.with_name(dest.name + ".part.tag")
     have = part.stat().st_size if part.exists() else 0
-    headers = {"Range": f"bytes={have}-"} if have else {}
+    try:
+        known = tag.read_text().strip() if have else ""
+    except (OSError, ValueError):
+        known = ""
+    if not known:
+        have = 0                           # nothing says which file the .part belongs to
+    headers = {"Accept-Encoding": "identity"}      # sizes and offsets are those of the file itself
+    if have:
+        headers.update({"Range": f"bytes={have}-", "If-Range": known})
 
     with session() as s, s.get(url, stream=True, timeout=(15, 60), headers=headers,
                                allow_redirects=True) as r:
-        if r.status_code == 416:          # .part already complete
-            os.replace(part, dest)
-            return dest
+        if r.status_code == 416:           # nothing left to send: the .part is complete, or too long
+            size = r.headers.get("Content-Range", "").rpartition("/")[2]
+            if have and size.isdigit() and int(size) == have:
+                os.replace(part, dest)
+                tag.unlink(missing_ok=True)
+                return dest
+            part.unlink(missing_ok=True)
+            tag.unlink(missing_ok=True)
+            if not have:
+                r.raise_for_status()
+            return download(url, dest, progress, cancel, chunk)     # once more, from the start
         r.raise_for_status()
-        if have and r.status_code != 206:  # server ignored Range: start over
+        if have and r.status_code != 206:  # no Range support, or the file changed: start over
             have = 0
         total = int(r.headers.get("Content-Length", 0))
         if total and r.status_code == 206:
             total += have
+        if not have:
+            known = _validator(r.headers)
+            if known:
+                tag.write_text(known)
+            else:
+                tag.unlink(missing_ok=True)
         mode = "ab" if have else "wb"
         done = have
         with open(part, mode) as fh:
@@ -86,7 +126,10 @@ def download(url: str, dest: Path, progress: ProgressFn | None = None,
                 done += len(block)
                 if progress:
                     progress(done, total)
+        if total and done != total and not r.headers.get("Content-Encoding"):
+            raise Incomplete(f"The download of {dest.name} stopped early ({done} of {total} bytes). Try again.")
     os.replace(part, dest)
+    tag.unlink(missing_ok=True)
     return dest
 
 

@@ -42,6 +42,8 @@ class MainWindow(QMainWindow):
         self.tagger: WindowTagger | None = None
         self.tracker = PlaytimeTracker()
         self._db_mtime = 0.0
+        self._rescan_pending = False        # a scan was asked for while one was running
+        self._rescan_updates = False        # ... and it should check for updates
         self._running: set[str] = set()
         self._last_error = ""
         self._clear_status_when: str | None = None   # uid whose start ends the current status text
@@ -287,7 +289,17 @@ class MainWindow(QMainWindow):
             self.rescan()
 
     def rescan(self, check_updates: bool = False):
+        """Scan the library in the background. One scan runs at a time; a request that arrives
+        meanwhile (product.db changed again) runs right after it instead of being dropped."""
         core = self.core
+        if self.tasks.running("scan"):
+            self._rescan_pending = True
+            self._rescan_updates = self._rescan_updates or check_updates
+            return
+        try:        # what this scan is about to read; poll() asks again only for a later change
+            self._db_mtime = core.bnet.product_db.stat().st_mtime
+        except OSError:
+            self._db_mtime = 0.0
 
         def work(progress, cancel):
             core.engine.runners(refresh=True)
@@ -325,8 +337,15 @@ class MainWindow(QMainWindow):
             updates = [s.game.name for s in core.library.states.values() if s.update_available]
             if check_updates and updates:
                 self.set_status(f"Updates available: {', '.join(updates)} — Battle.net installs them when it runs.")
+            self._after_scan()
 
-        self.tasks.start("Scanning library", work, done, key="scan" + ("-u" if check_updates else ""), quiet=True)
+        self.tasks.start("Scanning library", work, done, on_error=lambda _msg: self._after_scan(), key="scan",
+                         quiet=True)
+
+    def _after_scan(self):
+        if self._rescan_pending:
+            updates, self._rescan_pending, self._rescan_updates = self._rescan_updates, False, False
+            self.rescan(check_updates=updates)
 
     # ------------------------------------------------------------------ status widgets
     def _refresh_bnet_widgets(self):
@@ -383,7 +402,8 @@ class MainWindow(QMainWindow):
         self.notify(f"{name} failed: {msg}", error=True)
         if tb:
             try:
-                (paths.LOG_DIR / "glacier-errors.log").open("a").write(f"\n# {time.ctime()} {name}\n{tb}")
+                with (paths.LOG_DIR / "glacier-errors.log").open("a") as fh:
+                    fh.write(f"\n# {time.ctime()} {name}\n{tb}")
             except OSError:
                 pass
         self.update_banner()
@@ -611,17 +631,22 @@ class MainWindow(QMainWindow):
         cf = self.curseforge
         page = self.addons_page
         if action == "open":
-            try:
+            # Off the GUI thread: a start may first hash the AppImage and clear old extractions.
+            def start(progress, cancel):
                 synced = sync_games(self.core.bnet, self.core.engine)
                 proc, log = cf.launch()
-            except (EngineError, OSError) as e:
-                QMessageBox.warning(self, "CurseForge", str(e))
-            else:
+                return synced, proc, log
+
+            def started(out):
+                synced, proc, log = out
                 extra = f" ({len(synced.added)} WoW folder(s) added, {len(synced.removed)} leftover(s) removed)" \
                     if synced.changed else ""
                 text = "Starting CurseForge…" + extra
                 self.set_status(text)
                 self._watch_curseforge(proc, log, text)
+
+            self.tasks.start("Starting CurseForge", start, started, key="curseforge-open", quiet=True,
+                             on_error=lambda msg: QMessageBox.warning(self, "CurseForge", msg))
             return
         if action == "remove":
             if QMessageBox.question(self, "Remove CurseForge",
@@ -661,11 +686,10 @@ class MainWindow(QMainWindow):
             return
         if QMessageBox.question(self, "Remove Proton", f"Delete {r.name}?") != QMessageBox.StandardButton.Yes:
             return
-        try:
-            proton.remove_runner(r)
-        except (OSError, RuntimeError) as e:
-            self.set_status(str(e), error=True)
-        self.on_runner_changed()
+        # Deleting a Proton build is a gigabyte or more of files: not on the GUI thread.
+        self.tasks.start(f"Removing {r.name}", lambda p, c: proton.remove_runner(r),
+                         lambda _: self.on_runner_changed(), on_error=lambda _msg: self.on_runner_changed(),
+                         key="runner-remove")
 
     def on_runner_changed(self):
         self.core.engine.runners(refresh=True)
