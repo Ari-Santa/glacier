@@ -826,7 +826,8 @@ class CurseForge:
             desktop.remove_entry(DESKTOP_ID)
         desktop.remove_icon(ICON)
         for p in (self.appimage, self.state_file, self._new_file,
-                  self._new_file.with_name(self._new_file.name + ".part")):
+                  self._new_file.with_name(self._new_file.name + ".part"),
+                  self._new_file.with_name(self._new_file.name + ".part.tag")):
             p.unlink(missing_ok=True)
         desktop.refresh()
 

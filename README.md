@@ -11,7 +11,7 @@ every game its own app-menu entry, icon and taskbar identity.
 | | |
 |---|---|
 | **Proton** | Uses Steam's Proton builds (auto-detected in every Steam library) or downloads **GE-Proton** from GitHub (sha512-verified). Runs Proton inside the **Steam Linux Runtime** container the build asks for (`toolmanifest.vdf` → Runtime 3.0 *sniper* or 4.0), downloading the runtime itself when Steam isn't installed. |
-| **Install** | `glacier setup` (or the first GUI start) creates a dedicated prefix, downloads `Battle.net-Setup.exe` from battle.net (redirect host and signer checked), and installs it with `--lang`/`--installpath` so **no clicks are needed**. The only manual step is logging in to your Blizzard account. |
+| **Install** | `glacier setup` (or the first GUI start) creates a dedicated prefix, downloads `Battle.net-Setup.exe` from battle.net (redirect host and the file's Blizzard publisher name checked), and installs it with `--lang`/`--installpath` so **no clicks are needed**. The only manual step is logging in to your Blizzard account. |
 | **Games** | Reads the Battle.net Agent's `product.db` (protobuf, decoded without dependencies) for installed games, paths, versions and live download/update progress. Falls back to scanning the usual folders. |
 | **Updates** | Compares installed versions with Blizzard's public version service (`us.version.battle.net`) and flags games with updates; Battle.net applies them when it runs. Optional autostart keeps Battle.net in the tray so games stay current. GE-Proton can auto-update too. |
 | **Launching** | `--exec="launch_uid <uid>"` through the running client (exact product, including WoW Classic flavours), or the game exe directly. Launches hand over to an already-running Battle.net in ~2 s. |

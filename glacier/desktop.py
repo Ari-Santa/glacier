@@ -102,15 +102,12 @@ def placeholder(initials: str, color: str, size: int = 256) -> Image.Image:
     scale = 4
     big = size * scale
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
-    grad = Image.new("RGBA", (big, big))
-    px = grad.load()
-    for y in range(big):
-        t = y / big
-        top = (min(255, int(r * 1.25 + 20)), min(255, int(g * 1.25 + 20)), min(255, int(b * 1.25 + 20)))
-        bot = (int(r * 0.45), int(g * 0.45), int(b * 0.45))
-        row = tuple(int(top[i] * (1 - t) + bot[i] * t) for i in range(3)) + (255,)
-        for x in range(big):
-            px[x, y] = row
+    top = (min(255, int(r * 1.25 + 20)), min(255, int(g * 1.25 + 20)), min(255, int(b * 1.25 + 20)))
+    bot = (int(r * 0.45), int(g * 0.45), int(b * 0.45))
+    column = Image.new("RGBA", (1, big))        # one pixel per row, stretched sideways
+    column.putdata([tuple(int(top[i] * (1 - y / big) + bot[i] * (y / big)) for i in range(3)) + (255,)
+                    for y in range(big)])
+    grad = column.resize((big, big), Image.NEAREST)
     mask = Image.new("L", (big, big), 0)
     ImageDraw.Draw(mask).rounded_rectangle((0, 0, big - 1, big - 1), radius=big // 5, fill=255)
     img.paste(grad, (0, 0), mask)
@@ -232,13 +229,25 @@ def write_entry(file_id: str, name: str, args: list[str], icon: str, *, comment:
     for key, (label, a_args) in (actions or {}).items():
         a_exec = " ".join(_quote_exec(a).replace("%", "%%") for a in glacier_command() + a_args)
         lines += ["", f"[Desktop Action {key}]", f"Name={_escape_value(label)}", f"Exec={a_exec}"]
-    paths.APPLICATIONS_DIR.mkdir(parents=True, exist_ok=True)
     path = paths.APPLICATIONS_DIR / file_id
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text("\n".join(lines) + "\n")
-    os.chmod(tmp, 0o755)
-    os.replace(tmp, path)
+    _write_if_changed(path, "\n".join(lines) + "\n", 0o755)
     return path
+
+
+def _write_if_changed(path: Path, text: str, mode: int) -> bool:
+    """Write a desktop file unless it already says exactly this. Desktops watch these folders
+    and rebuild their menus on every change, and Glacier syncs its entries after each scan."""
+    try:
+        if path.read_text() == text and (path.stat().st_mode & 0o777) == mode:
+            return False
+    except (OSError, ValueError):
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+    return True
 
 
 def remove_entry(file_id: str) -> None:
@@ -291,14 +300,13 @@ def set_autostart(enabled: bool) -> None:
     if not enabled:
         AUTOSTART_FILE.unlink(missing_ok=True)
         return
-    exec_line = " ".join(_quote_exec(a) for a in glacier_command() + ["bnet", "--background"])
-    AUTOSTART_FILE.parent.mkdir(parents=True, exist_ok=True)
-    AUTOSTART_FILE.write_text("\n".join([
+    exec_line = " ".join(_quote_exec(a).replace("%", "%%") for a in glacier_command() + ["bnet", "--background"])
+    _write_if_changed(AUTOSTART_FILE, "\n".join([
         "[Desktop Entry]", "Type=Application", "Name=Battle.net (Glacier)",
         "Comment=Start Battle.net minimised so games stay up to date",
         f"Exec={exec_line}", f"Icon={icon_name('battlenet')}", "Terminal=false",
         "X-GNOME-Autostart-Delay=20", "X-KDE-autostart-after=panel", "X-Glacier-Managed=true",
-    ]) + "\n")
+    ]) + "\n", 0o644)
 
 
 def install_app_entry() -> Path:

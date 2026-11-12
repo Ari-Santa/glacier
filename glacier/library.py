@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import fnmatch
 import os
 import re
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,7 +11,7 @@ from PIL import Image
 
 from . import blizzard, desktop, games, paths, pe, stats
 from .battlenet import BNET_HELPERS, SYSTEM_EXES, BattleNet
-from .engine import Engine, EngineError
+from .engine import Engine, EngineError, split_args
 from .games import GameDef
 
 BNET_UID = "battlenet"
@@ -249,7 +247,14 @@ class Library:
         marker = paths.ICONS_DIR / f"{name}.src"
         # Battle.net's own big icon for the product: some games (retail WoW) ship only 48 px in the exe.
         art = self.bnet.product_icon(st.game.launch)
-        src = (str(st.exe) if st.exe else "placeholder") + (f"|{art.name}" if art else "")
+        src = "placeholder"
+        if st.exe:
+            try:        # size and date too: a patch replaces the exe, and may bring an icon with it
+                info = st.exe.stat()
+                src = f"{st.exe}|{info.st_size}|{info.st_mtime_ns}"
+            except OSError:
+                src = str(st.exe)
+        src += f"|{art.name}" if art else ""
         try:
             up_to_date = png.exists() and marker.read_text() == src
         except OSError:
@@ -287,7 +292,9 @@ class Library:
         if not made:
             png = desktop.install_placeholder_icon(name, st.game.initials, st.game.color)
         paths.ICONS_DIR.mkdir(parents=True, exist_ok=True)
-        marker.write_text(src if made else "placeholder")
+        # Record what was looked at even when only a placeholder came of it, so an exe without an
+        # icon isn't tried again on every scan (a patched exe or new Battle.net art changes src).
+        marker.write_text(src)
         return png
 
     def ensure_bnet_icon(self) -> Path:
@@ -368,7 +375,7 @@ class Library:
             raise NotRegisteredError(self.locate_hint(st))
         stats.touch(st.uid)
         if direct:
-            args = shlex.split(gcfg.get("args") or "")
+            args = split_args(gcfg.get("args"), f"{st.game.name}'s extra arguments")
             spec = self.engine.build(st.exe, args, uid=st.uid, verb="auto",
                                      install_dir=st.install_dir, log_name=st.uid)
             return self.engine.spawn(spec)
@@ -411,6 +418,10 @@ class Library:
         except OSError:
             return None
         target = st.install_dir.resolve() if st.install_dir else None
+        uid = (st.db_uid or "").lower()
+        # WoW flavours share one install folder, so the folder alone doesn't say whose uninstaller it is.
+        shared = any(o is not st and o.installed and o.install_dir == st.install_dir for o in self.states.values())
+        name = st.game.name.lower()
         for block in text.split("\n\n"):
             if "\\\\Uninstall\\\\" not in block.split("\n", 1)[0]:
                 continue
@@ -419,11 +430,16 @@ class Library:
             loc = vals.get("InstallLocation", "")
             if not loc or not vals.get("UninstallString"):
                 continue
-            loc_unix = self.engine.win_to_unix(loc)
-            match = (target and loc_unix and loc_unix.resolve() == target) or \
-                    (fnmatch.fnmatch(vals.get("DisplayName", "").lower(), f"*{st.game.name.lower()}*"))
+            parts = _split_windows_cmdline(vals["UninstallString"])
+            uids = [p.split("=", 1)[1].lower() for p in parts[1:] if p.lower().startswith("--uid=")]
+            if uids:
+                # Blizzard's uninstaller names its product: only that one counts.
+                match = bool(uid) and uid in uids
+            else:
+                loc_unix = self.engine.win_to_unix(loc)
+                match = (bool(target and loc_unix and loc_unix.resolve() == target) and not shared) or \
+                    vals.get("DisplayName", "").strip().lower() == name
             if match:
-                parts = _split_windows_cmdline(vals["UninstallString"])
                 if parts:
                     exe = self.engine.win_to_unix(parts[0])
                     if exe and exe.is_file():

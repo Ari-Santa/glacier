@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import shutil
@@ -12,6 +13,7 @@ import time
 from pathlib import Path
 
 from . import APP_NAME, __version__, desktop, paths, proton, stats
+from .config import DEFAULTS
 from .core import Core
 from .download import Cancelled, describe_error
 from .engine import EngineError
@@ -380,6 +382,18 @@ def cmd_config(core: Core, a) -> int:
         value = json.loads(a.value)
     except ValueError:
         value = a.value
+    if a.key not in DEFAULTS:
+        near = difflib.get_close_matches(a.key, DEFAULTS, 1)
+        print(f"error: no setting named {a.key}" + (f" (did you mean {near[0]}?)" if near else "")
+              + "; `glacier config` lists them", file=sys.stderr)
+        return 2
+    want = type(DEFAULTS[a.key])
+    if want is str and not isinstance(value, (dict, list)):
+        value = a.value                     # "5" stays text for a text setting
+    if type(value) is not want:
+        kind = {bool: "true or false", str: "text", dict: "a JSON object"}.get(want, want.__name__)
+        print(f"error: {a.key} takes {kind}", file=sys.stderr)
+        return 2
     core.cfg.update(**{a.key: value})
     print(f"{a.key} = {json.dumps(value)}")
     return 0

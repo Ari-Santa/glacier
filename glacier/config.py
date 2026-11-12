@@ -60,7 +60,6 @@ GAME_DEFAULTS: dict[str, Any] = {
     "mangohud": None,          # None = inherit global
     "gamemode": None,
     "gamescope": None,
-    "last_played": 0,
     "hidden": False,
 }
 
@@ -72,11 +71,27 @@ class Config:
         self.path = path
         self._lock = threading.RLock()
         self.data: dict[str, Any] = copy.deepcopy(DEFAULTS)
+        self._stamp: tuple[int, int] | None = None     # the file as this object last read or wrote it
         self.load()
+
+    def _file_stamp(self) -> tuple[int, int] | None:
+        try:
+            st = self.path.stat()
+        except OSError:
+            return None
+        return st.st_mtime_ns, st.st_size
+
+    def _sync(self) -> None:
+        """Pick up what another Glacier process (the CLI next to the open window) saved since,
+        so the write that follows doesn't undo it."""
+        stamp = self._file_stamp()
+        if stamp is not None and stamp != self._stamp:
+            self.load()
 
     def load(self) -> None:
         with self._lock:
             data = copy.deepcopy(DEFAULTS)
+            self._stamp = self._file_stamp()
             try:
                 raw = json.loads(self.path.read_text())
                 if isinstance(raw, dict):
@@ -101,6 +116,7 @@ class Config:
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(self.data, indent=2, sort_keys=True))
             os.replace(tmp, self.path)
+            self._stamp = self._file_stamp()
 
     def __getitem__(self, key: str) -> Any:
         with self._lock:
@@ -116,6 +132,7 @@ class Config:
 
     def update(self, **values: Any) -> None:
         with self._lock:
+            self._sync()
             self.data.update(values)
             self.save()
 
@@ -128,6 +145,7 @@ class Config:
 
     def set_game(self, uid: str, **values: Any) -> None:
         with self._lock:
+            self._sync()
             entry = self.data["games"].setdefault(uid, {})
             entry.update(values)
             # Drop keys equal to defaults to keep the file tidy.
